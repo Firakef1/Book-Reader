@@ -150,6 +150,22 @@ npx expo start -c
 | `npm run android` | Start and open Android |
 | `npm run ios` | Start and open iOS |
 | `npm run web` | Start web |
+| `npm run build:preview` | EAS Android APK (internal / OTA-capable) |
+| `npm run update:preview` | Publish JS/asset OTA to the `preview` channel |
+
+---
+
+## CI / OTA updates
+
+Pushes to `main` publish an **EAS Update** to the `preview` channel (GitHub Action). Manual native builds use **Actions → EAS Build**.
+
+**One-time GitHub setup**
+
+1. Create an Expo access token: https://expo.dev/settings/access-tokens  
+2. Add it as a repo secret named `EXPO_TOKEN`:  
+   `https://github.com/Firakef1/Book-Reader/settings/secrets/actions`
+
+**Important:** OTA only works on installs that were built *with* EAS Update (this repo’s `updates.url` + `channel`). Your older APK cannot receive updates—install one new **preview** build, then later pushes update that install. Force-close and reopen the app twice to apply an update. Keep `version` in `app.json` the same unless you ship a new native build (`runtimeVersion` policy is `appVersion`).
 
 ---
 

@@ -46,7 +46,8 @@
           "resizeMode": "contain"
         }
       ],
-      "expo-asset"
+      "expo-asset",
+      "expo-updates"
     ],
     "extra": {
       "router": {},
@@ -54,6 +55,12 @@
         "projectId": "05592eff-e556-4e6e-b42e-3c4fd39f1e0b"
       }
     },
-    "owner": "firakef"
+    "owner": "firakef",
+    "runtimeVersion": {
+      "policy": "appVersion"
+    },
+    "updates": {
+      "url": "https://u.expo.dev/05592eff-e556-4e6e-b42e-3c4fd39f1e0b"
+    }
   }
 }
