@@ -1,0 +1,39 @@
+# Dependencies
+node_modules/
+
+# Expo / Metro
+.expo/
+dist/
+web-build/
+expo-env.d.ts
+.metro-health-check*
+
+# Native
+.kotlin/
+/ios
+/android
+*.orig.*
+*.jks
+*.p8
+*.p12
+*.key
+*.mobileprovision
+
+# Debug / env
+npm-debug.*
+yarn-debug.*
+yarn-error.*
+.env
+.env*.local
+
+# OS / editor
+.DS_Store
+*.pem
+.vscode/
+.idea/
+
+# Local scratch (not part of the app)
+_tmp_*
+Pasted image.png
+*.mkv
+agent-transcripts/
