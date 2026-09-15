@@ -14,10 +14,22 @@ import { BookCoverCard } from '../../src/components/BookCoverCard';
 import { EditBookModal } from '../../src/components/EditBookModal';
 import { MiniBookCard } from '../../src/components/MiniBookCard';
 import { useAppTheme } from '../../src/hooks/useAppTheme';
-import { pickAndImportBook } from '../../src/services/bookImport';
+import { pickAndImportBooks } from '../../src/services/bookImport';
 import { useLibraryStore } from '../../src/store/libraryStore';
-import { Book, LibrarySort } from '../../src/types';
-import { formatRelativeTime, deriveBookStatus } from '../../src/utils/helpers';
+import {
+  Book,
+  BookStatus,
+  FileType,
+  LibraryFormatFilter,
+  LibrarySort,
+  LibraryStatusFilter,
+} from '../../src/types';
+import {
+  estimateMinutesRemaining,
+  formatMinutes,
+  formatRelativeTime,
+  deriveBookStatus,
+} from '../../src/utils/helpers';
 
 const sortOptions: { label: string; value: LibrarySort }[] = [
   { label: 'Recent', value: 'recentlyRead' },
@@ -29,11 +41,13 @@ const sortOptions: { label: string; value: LibrarySort }[] = [
 export default function LibraryScreen() {
   const theme = useAppTheme();
   const router = useRouter();
-  const [sort, setSort] = useState<LibrarySort>('recentlyRead');
+  const preferences = useLibraryStore((s) => s.preferences);
+  const sort = preferences.librarySort ?? 'recentlyRead';
+  const statusFilter =
+    (preferences.libraryStatusFilter as LibraryStatusFilter) ?? 'all';
+  const formatFilter =
+    (preferences.libraryFormatFilter as LibraryFormatFilter) ?? 'all';
   const [query, setQuery] = useState('');
-  const [statusFilter, setStatusFilter] = useState<
-    'all' | 'reading' | 'toRead' | 'completed'
-  >('all');
   const [importing, setImporting] = useState(false);
 
   const books = useLibraryStore((s) => s.books);
@@ -44,6 +58,11 @@ export default function LibraryScreen() {
   const addBook = useLibraryStore((s) => s.addBook);
   const deleteBook = useLibraryStore((s) => s.deleteBook);
   const updateBook = useLibraryStore((s) => s.updateBook);
+  const setBookStatus = useLibraryStore((s) => s.setBookStatus);
+  const findDuplicate = useLibraryStore((s) => s.findDuplicate);
+  const setLibrarySort = useLibraryStore((s) => s.setLibrarySort);
+  const setLibraryStatusFilter = useLibraryStore((s) => s.setLibraryStatusFilter);
+  const setLibraryFormatFilter = useLibraryStore((s) => s.setLibraryFormatFilter);
 
   const lastBook = getLastReadBook();
   const recent = getRecentlyRead(8);
@@ -65,6 +84,9 @@ export default function LibraryScreen() {
         (b) => deriveBookStatus(b, progress[b.id]) === statusFilter,
       );
     }
+    if (formatFilter !== 'all') {
+      list = list.filter((b) => b.fileType === formatFilter);
+    }
     if (query.trim()) {
       const q = query.trim().toLowerCase();
       list = list.filter(
@@ -74,17 +96,49 @@ export default function LibraryScreen() {
       );
     }
     return list;
-  }, [books, progress, sort, statusFilter, query, getSortedBooks]);
+  }, [books, progress, sort, statusFilter, formatFilter, query, getSortedBooks]);
 
   const openBook = (id: string) => router.push(`/reader/${id}`);
 
   const handleImport = async () => {
     try {
       setImporting(true);
-      const book = await pickAndImportBook();
-      if (!book) return;
-      addBook(book);
-      Alert.alert('Imported', `"${book.title}" was added to your library.`);
+      const result = await pickAndImportBooks({
+        isDuplicate: (book) =>
+          findDuplicate({
+            title: book.title,
+            fileType: book.fileType,
+            sourceName: book.sourceName,
+            sourceSize: book.sourceSize,
+          }),
+        onDuplicate: () => 'skip',
+      });
+      if (
+        result.books.length === 0 &&
+        result.skippedDuplicates.length === 0 &&
+        result.errors.length === 0
+      ) {
+        return;
+      }
+      for (const book of result.books) addBook(book);
+      const parts: string[] = [];
+      if (result.books.length === 1) {
+        parts.push(`"${result.books[0].title}" was added.`);
+      } else if (result.books.length > 1) {
+        parts.push(`${result.books.length} books were added.`);
+      }
+      if (result.skippedDuplicates.length) {
+        parts.push(
+          `Skipped ${result.skippedDuplicates.length} duplicate${result.skippedDuplicates.length === 1 ? '' : 's'}.`,
+        );
+      }
+      if (result.errors.length) {
+        parts.push(`${result.errors.length} failed.`);
+      }
+      Alert.alert(
+        result.books.length ? 'Imported' : 'Import finished',
+        parts.join(' ') || 'Nothing imported.',
+      );
     } catch (error) {
       Alert.alert(
         'Import failed',
@@ -109,7 +163,20 @@ export default function LibraryScreen() {
   const openBookActions = (book: Book) => {
     Alert.alert(book.title, 'What would you like to do?', [
       { text: 'Cancel', style: 'cancel' },
+      { text: 'Open', onPress: () => openBook(book.id) },
       { text: 'Edit name', onPress: () => setEditingBook(book) },
+      {
+        text: 'Mark Reading',
+        onPress: () => setBookStatus(book.id, 'reading' as BookStatus),
+      },
+      {
+        text: 'Mark To Read',
+        onPress: () => setBookStatus(book.id, 'toRead' as BookStatus),
+      },
+      {
+        text: 'Mark Done',
+        onPress: () => setBookStatus(book.id, 'completed' as BookStatus),
+      },
       {
         text: 'Delete',
         style: 'destructive',
@@ -123,6 +190,21 @@ export default function LibraryScreen() {
     if (!p || totalPages <= 0) return 0;
     return ((p.currentPage + 1) / totalPages) * 100;
   };
+
+  const lastBookEta = useMemo(() => {
+    if (!lastBook) return null;
+    const p = progress[lastBook.id];
+    if (!p) return null;
+    const pagesLeft = Math.max(
+      0,
+      lastBook.totalPages - ((p.currentPage ?? 0) + 1),
+    );
+    return estimateMinutesRemaining(
+      pagesLeft,
+      p.totalTimeRead,
+      Math.max(1, (p.currentPage ?? 0) + 1),
+    );
+  }, [lastBook, progress]);
 
   return (
     <SafeAreaView
@@ -169,7 +251,12 @@ export default function LibraryScreen() {
               book={lastBook}
               featured
               progressPercent={progressFor(lastBook.id, lastBook.totalPages)}
-              pageLabel={`Page ${(progress[lastBook.id]?.currentPage ?? 0) + 1} of ${lastBook.totalPages}`}
+              pageLabel={[
+                `Page ${(progress[lastBook.id]?.currentPage ?? 0) + 1} of ${lastBook.totalPages}`,
+                lastBookEta != null ? `~${formatMinutes(lastBookEta)} left` : null,
+              ]
+                .filter(Boolean)
+                .join(' · ')}
               lastReadLabel={
                 progress[lastBook.id]?.lastReadDate
                   ? formatRelativeTime(progress[lastBook.id].lastReadDate)
@@ -234,7 +321,7 @@ export default function LibraryScreen() {
             return (
               <Pressable
                 key={value}
-                onPress={() => setStatusFilter(value)}
+                onPress={() => setLibraryStatusFilter(value)}
                 style={[
                   styles.categoryCard,
                   {
@@ -319,14 +406,29 @@ export default function LibraryScreen() {
         ) : null}
 
         <View style={styles.section}>
-          <Text
-            style={[
-              styles.sectionTitle,
-              { color: theme.text, fontFamily: 'Literata_700Bold' },
-            ]}
-          >
-            Shelf
-          </Text>
+          <View style={styles.shelfHeader}>
+            <Text
+              style={[
+                styles.sectionTitle,
+                { color: theme.text, fontFamily: 'Literata_700Bold' },
+              ]}
+            >
+              Shelf
+            </Text>
+            {books.length > 0 ? (
+              <Pressable onPress={handleImport}>
+                <Text
+                  style={{
+                    color: theme.textSecondary,
+                    fontFamily: 'SourceSans3_600SemiBold',
+                    fontSize: 13,
+                  }}
+                >
+                  Import another
+                </Text>
+              </Pressable>
+            ) : null}
+          </View>
           <TextInput
             value={query}
             onChangeText={setQuery}
@@ -350,23 +452,21 @@ export default function LibraryScreen() {
           >
             {(
               [
-                ['all', 'All'],
-                ['reading', 'Reading'],
-                ['toRead', 'To Read'],
-                ['completed', 'Done'],
+                ['all', 'All formats'],
+                ['pdf', 'PDF'],
+                ['epub', 'EPUB'],
+                ['txt', 'TXT'],
               ] as const
             ).map(([value, label]) => {
-              const active = statusFilter === value;
+              const active = formatFilter === value;
               return (
                 <Pressable
                   key={value}
-                  onPress={() => setStatusFilter(value)}
+                  onPress={() => setLibraryFormatFilter(value)}
                   style={[
                     styles.chip,
                     {
-                      backgroundColor: active
-                        ? theme.accent
-                        : 'transparent',
+                      backgroundColor: active ? theme.accent : 'transparent',
                       borderColor: active ? theme.accent : theme.border,
                     },
                   ]}
@@ -389,11 +489,10 @@ export default function LibraryScreen() {
 
           <View style={styles.sortRow}>
             {sortOptions.map((opt) => (
-              <Pressable key={opt.value} onPress={() => setSort(opt.value)}>
+              <Pressable key={opt.value} onPress={() => setLibrarySort(opt.value)}>
                 <Text
                   style={{
-                    color:
-                      sort === opt.value ? theme.text : theme.textMuted,
+                    color: sort === opt.value ? theme.text : theme.textMuted,
                     fontWeight: sort === opt.value ? '700' : '500',
                     fontSize: 12,
                     letterSpacing: 0.4,
@@ -412,7 +511,7 @@ export default function LibraryScreen() {
                 key={book.id}
                 book={book}
                 progressPercent={progressFor(book.id, book.totalPages)}
-                pageLabel={`Page ${(progress[book.id]?.currentPage ?? 0) + 1} / ${book.totalPages}`}
+                pageLabel={`Page ${(progress[book.id]?.currentPage ?? 0) + 1} / ${book.totalPages} · ${book.fileType.toUpperCase()}`}
                 onPress={() => openBook(book.id)}
                 onMenuPress={() => openBookActions(book)}
               />
@@ -497,6 +596,11 @@ const styles = StyleSheet.create({
     borderRadius: 99,
   },
   section: { gap: 14 },
+  shelfHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'flex-end',
+  },
   sectionTitle: { fontSize: 24 },
   carousel: { gap: 16, paddingRight: 8, paddingBottom: 8, paddingTop: 4 },
   search: {

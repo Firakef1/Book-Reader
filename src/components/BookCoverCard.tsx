@@ -1,5 +1,5 @@
 import React from 'react';
-import { Pressable, StyleSheet, Text, View } from 'react-native';
+import { Image, Pressable, StyleSheet, Text, View } from 'react-native';
 import { Book } from '../types';
 import { useAppTheme } from '../hooks/useAppTheme';
 
@@ -86,13 +86,27 @@ export function BookCoverCard({
                 { backgroundColor: book.coverColor },
               ]}
             >
-              <Text style={styles.format}>{book.fileType.toUpperCase()}</Text>
-              <Text style={styles.coverTitle} numberOfLines={4}>
-                {book.title}
-              </Text>
-              <Text style={styles.coverAuthor} numberOfLines={2}>
-                {book.author}
-              </Text>
+              {book.coverImage ? (
+                <Image
+                  source={{ uri: book.coverImage }}
+                  style={StyleSheet.absoluteFill}
+                  resizeMode="cover"
+                />
+              ) : null}
+              <View
+                style={[
+                  styles.coverScrim,
+                  book.coverImage ? styles.coverScrimImage : null,
+                ]}
+              >
+                <Text style={styles.format}>{book.fileType.toUpperCase()}</Text>
+                <Text style={styles.coverTitle} numberOfLines={4}>
+                  {book.title}
+                </Text>
+                <Text style={styles.coverAuthor} numberOfLines={2}>
+                  {book.author}
+                </Text>
+              </View>
             </View>
           </View>
           {featured ? (
@@ -264,12 +278,20 @@ const styles = StyleSheet.create({
     height: 112,
     borderTopRightRadius: 8,
     borderBottomRightRadius: 8,
-    padding: 10,
+    overflow: 'hidden',
     justifyContent: 'space-between',
   },
   coverFeatured: {
     width: 92,
     height: 132,
+  },
+  coverScrim: {
+    flex: 1,
+    padding: 10,
+    justifyContent: 'space-between',
+  },
+  coverScrimImage: {
+    backgroundColor: 'rgba(0,0,0,0.35)',
   },
   glass: {
     position: 'absolute',

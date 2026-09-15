@@ -11,6 +11,14 @@ export type LibrarySort =
   | 'alphabetical'
   | 'recentlyAdded'
   | 'progress';
+export type LibraryStatusFilter = 'all' | BookStatus;
+export type LibraryFormatFilter = 'all' | FileType;
+
+export interface BookChapter {
+  title: string;
+  /** Character offset into the flattened book content. */
+  startOffset: number;
+}
 
 export interface Book {
   id: string;
@@ -20,11 +28,19 @@ export interface Book {
   coverImage?: string;
   filePath: string;
   fileType: FileType;
+  /** In-memory text; persisted separately on disk for EPUB/TXT. */
   content: string;
   totalPages: number;
   addedDate: string;
   status: BookStatus;
+  /** When true, auto status derivation will not overwrite user choice. */
+  statusLocked?: boolean;
   collection?: string;
+  chapters?: BookChapter[];
+  /** Original filename used for duplicate detection. */
+  sourceName?: string;
+  /** Byte size when known — duplicate detection. */
+  sourceSize?: number;
 }
 
 export interface ReadingSession {
@@ -38,6 +54,8 @@ export interface ReadingProgress {
   bookId: string;
   currentPage: number;
   scrollPosition: number;
+  /** Stable resume anchor for text books (character index into content). */
+  contentOffset?: number;
   lastReadDate: string;
   totalTimeRead: number;
   readingSessions: ReadingSession[];
@@ -70,10 +88,33 @@ export interface AppPreferences {
   pageTurnMode: PageTurnMode;
   hasCompletedOnboarding: boolean;
   lastOpenedBookId: string | null;
+  /** Resume the last book automatically when the app opens. */
+  openLastBookOnLaunch: boolean;
+  /** Prevent the screen from sleeping while reading. */
+  keepScreenAwake: boolean;
+  librarySort: LibrarySort;
+  libraryStatusFilter: LibraryStatusFilter;
+  libraryFormatFilter: LibraryFormatFilter;
 }
 
 export interface DailyStat {
   date: string;
   pagesRead: number;
   minutesRead: number;
+}
+
+export interface LibraryBackup {
+  version: 1;
+  exportedAt: string;
+  /** Books without full text bodies (content stripped). */
+  books: Book[];
+  progress: Record<string, ReadingProgress>;
+  highlights: Highlight[];
+  preferences: AppPreferences;
+  dailyStats: DailyStat[];
+}
+
+export interface PdfOutlineItem {
+  title: string;
+  pageIndex: number;
 }

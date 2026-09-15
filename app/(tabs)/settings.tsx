@@ -1,5 +1,6 @@
 import React from 'react';
 import {
+  Alert,
   Pressable,
   ScrollView,
   StyleSheet,
@@ -7,6 +8,10 @@ import {
   Text,
   View,
 } from 'react-native';
+import Constants from 'expo-constants';
+import * as DocumentPicker from 'expo-document-picker';
+import * as FileSystem from 'expo-file-system/legacy';
+import * as Sharing from 'expo-sharing';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { SegmentedControl } from '../../src/components/SegmentedControl';
 import { useAppTheme } from '../../src/hooks/useAppTheme';
@@ -14,6 +19,7 @@ import { themes } from '../../src/theme/colors';
 import { useLibraryStore } from '../../src/store/libraryStore';
 import {
   FontFamily,
+  LibraryBackup,
   LineHeight,
   PageTurnMode,
   TextAlign,
@@ -31,13 +37,82 @@ export default function SettingsScreen() {
   const setFollowSystemTheme = useLibraryStore((s) => s.setFollowSystemTheme);
   const setTextPreferences = useLibraryStore((s) => s.setTextPreferences);
   const setPageTurnMode = useLibraryStore((s) => s.setPageTurnMode);
+  const setOpenLastBookOnLaunch = useLibraryStore(
+    (s) => s.setOpenLastBookOnLaunch,
+  );
+  const setKeepScreenAwake = useLibraryStore((s) => s.setKeepScreenAwake);
+  const resetOnboarding = useLibraryStore((s) => s.resetOnboarding);
+  const exportBackup = useLibraryStore((s) => s.exportBackup);
+  const importBackupMeta = useLibraryStore((s) => s.importBackupMeta);
   const pageTurnMode = preferences.pageTurnMode ?? 'scroll';
+  const appVersion =
+    Constants.expoConfig?.version ?? Constants.nativeAppVersion ?? '1.0.0';
 
   const previewFont = getFontFamilyName(
     preferences.text.fontFamily,
     true,
     true,
   );
+
+  const handleExport = async () => {
+    try {
+      const backup = exportBackup();
+      const dir = FileSystem.cacheDirectory ?? FileSystem.documentDirectory;
+      if (!dir) throw new Error('No writable directory available.');
+      const path = `${dir}bookreader-backup-${Date.now()}.json`;
+      await FileSystem.writeAsStringAsync(path, JSON.stringify(backup, null, 2));
+      const canShare = await Sharing.isAvailableAsync();
+      if (!canShare) {
+        Alert.alert('Backup saved', `Saved to:\n${path}`);
+        return;
+      }
+      await Sharing.shareAsync(path, {
+        mimeType: 'application/json',
+        dialogTitle: 'Export BookReader backup',
+      });
+    } catch (e) {
+      Alert.alert(
+        'Export failed',
+        e instanceof Error ? e.message : 'Could not export backup.',
+      );
+    }
+  };
+
+  const handleRestore = async () => {
+    try {
+      const picked = await DocumentPicker.getDocumentAsync({
+        type: ['application/json', 'text/json', '*/*'],
+        copyToCacheDirectory: true,
+        multiple: false,
+      });
+      if (picked.canceled || !picked.assets?.[0]) return;
+      const raw = await FileSystem.readAsStringAsync(picked.assets[0].uri);
+      const parsed = JSON.parse(raw) as LibraryBackup;
+      if (!parsed || parsed.version !== 1 || !Array.isArray(parsed.books)) {
+        throw new Error('This file is not a BookReader backup.');
+      }
+      Alert.alert(
+        'Restore backup?',
+        'This replaces library metadata, progress, and highlights on this device. Book files already on disk stay; missing files need re-import.',
+        [
+          { text: 'Cancel', style: 'cancel' },
+          {
+            text: 'Restore',
+            style: 'destructive',
+            onPress: () => {
+              importBackupMeta(parsed);
+              Alert.alert('Restored', 'Backup data was applied.');
+            },
+          },
+        ],
+      );
+    } catch (e) {
+      Alert.alert(
+        'Restore failed',
+        e instanceof Error ? e.message : 'Could not read that backup.',
+      );
+    }
+  };
 
   return (
     <SafeAreaView
@@ -114,6 +189,50 @@ export default function SettingsScreen() {
         <Text style={{ color: theme.textMuted, lineHeight: 20, marginTop: -4 }}>
           Scroll continuously, or swipe/tap edges to flip one page at a time.
         </Text>
+
+        <View
+          style={[
+            styles.rowBetween,
+            { backgroundColor: theme.surface, borderColor: theme.border },
+          ]}
+        >
+          <View style={{ flex: 1, paddingRight: 12 }}>
+            <Text style={{ color: theme.text, fontWeight: '600' }}>
+              Open last book on launch
+            </Text>
+            <Text style={{ color: theme.textMuted, fontSize: 12, marginTop: 4 }}>
+              Jump straight back into what you were reading.
+            </Text>
+          </View>
+          <Switch
+            value={preferences.openLastBookOnLaunch !== false}
+            onValueChange={setOpenLastBookOnLaunch}
+            trackColor={{ true: theme.warm, false: theme.border }}
+            thumbColor={theme.accent}
+          />
+        </View>
+
+        <View
+          style={[
+            styles.rowBetween,
+            { backgroundColor: theme.surface, borderColor: theme.border },
+          ]}
+        >
+          <View style={{ flex: 1, paddingRight: 12 }}>
+            <Text style={{ color: theme.text, fontWeight: '600' }}>
+              Keep screen awake
+            </Text>
+            <Text style={{ color: theme.textMuted, fontSize: 12, marginTop: 4 }}>
+              Prevent sleep while a book is open.
+            </Text>
+          </View>
+          <Switch
+            value={preferences.keepScreenAwake !== false}
+            onValueChange={setKeepScreenAwake}
+            trackColor={{ true: theme.warm, false: theme.border }}
+            thumbColor={theme.accent}
+          />
+        </View>
 
         <Text style={[styles.section, { color: theme.text }]}>
           Text appearance
@@ -242,9 +361,60 @@ export default function SettingsScreen() {
           </View>
         </View>
 
+        <Text style={[styles.section, { color: theme.text }]}>Data</Text>
+        <Pressable
+          onPress={handleExport}
+          style={[
+            styles.actionBtn,
+            { backgroundColor: theme.surface, borderColor: theme.border },
+          ]}
+        >
+          <Text style={{ color: theme.text, fontWeight: '700' }}>
+            Export backup
+          </Text>
+          <Text style={{ color: theme.textMuted, marginTop: 4, fontSize: 12 }}>
+            Share progress, highlights, and library metadata (book text stays on
+            device).
+          </Text>
+        </Pressable>
+        <Pressable
+          onPress={handleRestore}
+          style={[
+            styles.actionBtn,
+            { backgroundColor: theme.surface, borderColor: theme.border },
+          ]}
+        >
+          <Text style={{ color: theme.text, fontWeight: '700' }}>
+            Restore backup
+          </Text>
+          <Text style={{ color: theme.textMuted, marginTop: 4, fontSize: 12 }}>
+            Pick a BookReader JSON backup to restore metadata.
+          </Text>
+        </Pressable>
+        <Pressable
+          onPress={() =>
+            Alert.alert(
+              'Replay onboarding?',
+              'You’ll see the welcome screen next launch.',
+              [
+                { text: 'Cancel', style: 'cancel' },
+                { text: 'Reset', onPress: () => resetOnboarding() },
+              ],
+            )
+          }
+          style={[
+            styles.actionBtn,
+            { backgroundColor: theme.surface, borderColor: theme.border },
+          ]}
+        >
+          <Text style={{ color: theme.text, fontWeight: '700' }}>
+            Reset onboarding
+          </Text>
+        </Pressable>
+
         <Text style={[styles.section, { color: theme.text }]}>About</Text>
         <Text style={{ color: theme.textMuted, lineHeight: 22 }}>
-          BookReader 1.0 — local-first reading with progress tracking,
+          BookReader {appVersion} — local-first reading with progress tracking,
           highlights, and calm themes. Your library stays on this device.
         </Text>
       </ScrollView>
@@ -256,7 +426,12 @@ const styles = StyleSheet.create({
   safe: { flex: 1 },
   content: { padding: 20, gap: 14, paddingBottom: 40 },
   title: { fontSize: 34, fontWeight: '700', marginBottom: 4 },
-  section: { fontSize: 18, fontWeight: '700', marginTop: 10, fontFamily: 'Literata_700Bold' },
+  section: {
+    fontSize: 18,
+    fontWeight: '700',
+    marginTop: 10,
+    fontFamily: 'Literata_700Bold',
+  },
   rowBetween: {
     flexDirection: 'row',
     justifyContent: 'space-between',
@@ -289,5 +464,10 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     paddingVertical: 12,
     borderRadius: 12,
+  },
+  actionBtn: {
+    borderWidth: StyleSheet.hairlineWidth,
+    borderRadius: 16,
+    padding: 14,
   },
 });

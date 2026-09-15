@@ -2,7 +2,8 @@ import * as DocumentPicker from 'expo-document-picker';
 import { Directory, File, Paths } from 'expo-file-system';
 import * as LegacyFS from 'expo-file-system/legacy';
 import JSZip from 'jszip';
-import { Book, FileType } from '../types';
+import { saveBookCoverBytes } from './bookContent';
+import { Book, BookChapter, FileType } from '../types';
 import { coverPalette } from '../theme/colors';
 import { charsPerPage } from '../theme/typography';
 import { createId, paginateText, stripHtml } from '../utils/helpers';
@@ -281,6 +282,9 @@ async function parseEpub(uri: string): Promise<{
   title: string;
   author: string;
   content: string;
+  chapters: BookChapter[];
+  coverBytes?: Uint8Array;
+  coverExt?: 'jpg' | 'png' | 'webp';
 }> {
   const bytes = await readLocalBytes(uri);
   const zip = await JSZip.loadAsync(bytes);
@@ -315,20 +319,81 @@ async function parseEpub(uri: string): Promise<{
   if (authorMatch) author = authorMatch[1].trim();
 
   const idToHref = new Map<string, string>();
+  const idToMedia = new Map<string, string>();
+  const idToTitle = new Map<string, string>();
   const allItems = [...opf.matchAll(/<item\b([^>]+)>/gi)];
   for (const item of allItems) {
     const attrs = item[1];
     const idAttr = attrs.match(/\bid=["']([^"']+)["']/i)?.[1];
     const href = attrs.match(/\bhref=["']([^"']+)["']/i)?.[1];
-    if (idAttr && href) idToHref.set(idAttr, href);
+    const media = attrs.match(/\bmedia-type=["']([^"']+)["']/i)?.[1];
+    const props = attrs.match(/\bproperties=["']([^"']+)["']/i)?.[1] ?? '';
+    if (idAttr && href) {
+      idToHref.set(idAttr, href);
+      if (media) idToMedia.set(idAttr, media);
+      if (/cover-image/i.test(props)) {
+        idToHref.set('__cover__', href);
+        if (media) idToMedia.set('__cover__', media);
+      }
+    }
+  }
+
+  const metaCover =
+    opf.match(/<meta[^>]+name=["']cover["'][^>]+content=["']([^"']+)["']/i)?.[1] ??
+    opf.match(/<meta[^>]+content=["']([^"']+)["'][^>]+name=["']cover["']/i)?.[1];
+  if (metaCover && idToHref.has(metaCover)) {
+    idToHref.set('__cover__', idToHref.get(metaCover)!);
+    const media = idToMedia.get(metaCover);
+    if (media) idToMedia.set('__cover__', media);
+  }
+
+  let coverBytes: Uint8Array | undefined;
+  let coverExt: 'jpg' | 'png' | 'webp' | undefined;
+  const coverHref = idToHref.get('__cover__');
+  if (coverHref) {
+    const coverPath = opfDir + coverHref;
+    const coverFile =
+      zip.file(coverPath) || zip.file(decodeURIComponent(coverPath));
+    if (coverFile) {
+      const buf = await coverFile.async('uint8array');
+      coverBytes = buf;
+      const media = (idToMedia.get('__cover__') ?? '').toLowerCase();
+      if (media.includes('png') || coverHref.toLowerCase().endsWith('.png')) {
+        coverExt = 'png';
+      } else if (
+        media.includes('webp') ||
+        coverHref.toLowerCase().endsWith('.webp')
+      ) {
+        coverExt = 'webp';
+      } else {
+        coverExt = 'jpg';
+      }
+    }
+  }
+
+  // Optional nav map titles (EPUB2)
+  const navMap = [...opf.matchAll(/<navPoint[\s\S]*?<\/navPoint>/gi)];
+  for (const nav of navMap) {
+    const label =
+      nav[0].match(/<n(?:avLabel)?[^>]*>[\s\S]*?<text[^>]*>([^<]+)<\/text>/i)?.[1] ??
+      nav[0].match(/<text[^>]*>([^<]+)<\/text>/i)?.[1];
+    const src = nav[0].match(/<content[^>]+src=["']([^"'#]+)/i)?.[1];
+    if (label && src) {
+      const normalized = decodeURIComponent(src.replace(/^\.\//, ''));
+      idToTitle.set(normalized, label.trim());
+      idToTitle.set(opfDir + normalized, label.trim());
+    }
   }
 
   const spineIds = [
     ...opf.matchAll(/<itemref[^>]+idref=["']([^"']+)["']/gi),
   ].map((m) => m[1]);
 
-  const chapters: string[] = [];
-  for (const spineId of spineIds) {
+  const chapterTexts: string[] = [];
+  const chapters: BookChapter[] = [];
+
+  for (let i = 0; i < spineIds.length; i++) {
+    const spineId = spineIds[i];
     const href = idToHref.get(spineId);
     if (!href) continue;
     const fullPath = opfDir + href;
@@ -337,15 +402,40 @@ async function parseEpub(uri: string): Promise<{
     if (!chapterFile) continue;
     const html = await chapterFile.async('text');
     const text = stripHtml(html);
-    if (text) chapters.push(text);
+    if (!text) continue;
+
+    const heading =
+      html.match(/<h[1-3][^>]*>([\s\S]*?)<\/h[1-3]>/i)?.[1] ??
+      html.match(/<title[^>]*>([^<]+)<\/title>/i)?.[1];
+    const fromNav =
+      idToTitle.get(href) ||
+      idToTitle.get(fullPath) ||
+      idToTitle.get(decodeURIComponent(href));
+    const chapterTitle = stripHtml(fromNav || heading || `Chapter ${i + 1}`)
+      .replace(/\s+/g, ' ')
+      .trim()
+      .slice(0, 80);
+
+    chapters.push({
+      title: chapterTitle || `Chapter ${i + 1}`,
+      startOffset: 0,
+    });
+    chapterTexts.push(text);
   }
 
-  const content = chapters.join('\n\n');
+  const content = chapterTexts.join('\n\n');
   if (!content.trim()) {
     throw new Error('Could not extract text from this EPUB');
   }
 
-  return { title, author, content };
+  let cursor = 0;
+  for (let i = 0; i < chapterTexts.length; i++) {
+    chapters[i].startOffset = cursor;
+    cursor += chapterTexts[i].length;
+    if (i < chapterTexts.length - 1) cursor += 2;
+  }
+
+  return { title, author, content, chapters, coverBytes, coverExt };
 }
 
 async function buildBookFromSavedFile(input: {
@@ -354,6 +444,7 @@ async function buildBookFromSavedFile(input: {
   mimeType?: string | null;
   filePath: string;
   fileType: FileType;
+  sourceSize?: number;
 }): Promise<Book> {
   const color = coverPalette[Math.floor(Math.random() * coverPalette.length)];
   const title = titleFromFilename(input.name);
@@ -370,12 +461,16 @@ async function buildBookFromSavedFile(input: {
       totalPages: 1,
       addedDate: new Date().toISOString(),
       status: 'toRead',
+      sourceName: input.name,
+      sourceSize: input.sourceSize,
     };
   }
 
   let author = 'Unknown Author';
   let content = '';
   let resolvedTitle = title;
+  let chapters: BookChapter[] | undefined;
+  let coverImage: string | undefined;
 
   if (input.fileType === 'txt') {
     content = await readLocalText(input.filePath);
@@ -384,6 +479,18 @@ async function buildBookFromSavedFile(input: {
     resolvedTitle = parsed.title || title;
     author = parsed.author;
     content = parsed.content;
+    chapters = parsed.chapters.length > 1 ? parsed.chapters : undefined;
+    if (parsed.coverBytes && parsed.coverExt) {
+      try {
+        coverImage = await saveBookCoverBytes(
+          input.id,
+          parsed.coverBytes,
+          parsed.coverExt,
+        );
+      } catch {
+        // optional
+      }
+    }
   }
 
   if (!content.trim()) {
@@ -397,22 +504,82 @@ async function buildBookFromSavedFile(input: {
     title: resolvedTitle,
     author,
     coverColor: color,
+    coverImage,
     filePath: input.filePath,
     fileType: input.fileType,
     content,
     totalPages: Math.max(1, pages.length),
     addedDate: new Date().toISOString(),
     status: 'toRead',
+    chapters,
+    sourceName: input.name,
+    sourceSize: input.sourceSize,
   };
 }
 
+async function importPickedAsset(input: {
+  name: string;
+  mimeType?: string | null;
+  uri: string;
+  pickedFile?: File | null;
+  size?: number | null;
+}): Promise<Book> {
+  const id = createId();
+  const name = resolveImportFileName({
+    name: input.name,
+    uri: input.uri,
+    mimeType: input.mimeType,
+    fallbackId: id,
+  });
+  const fileType = detectType(name, input.mimeType);
+  if (!fileType) {
+    throw new Error(
+      'Unsupported file type. Please import .pdf, .epub, or .txt files.',
+    );
+  }
+
+  let filePath: string;
+  if (input.pickedFile) {
+    filePath = await persistExpoFile(input.pickedFile, id, fileType);
+  } else {
+    filePath = await persistUri(input.uri, id, fileType);
+  }
+
+  let sourceSize = input.size ?? undefined;
+  try {
+    const saved = new File(filePath);
+    if (typeof saved.size === 'number' && saved.size > 0) {
+      sourceSize = saved.size;
+    }
+  } catch {
+    // ignore
+  }
+
+  return buildBookFromSavedFile({
+    id,
+    name,
+    mimeType: input.mimeType,
+    filePath,
+    fileType,
+    sourceSize,
+  });
+}
+
+export type ImportBooksResult = {
+  books: Book[];
+  skippedDuplicates: string[];
+  errors: string[];
+};
+
 /**
- * Pick and import a book.
- * Primary path: expo-document-picker (returns the real display name via Android
- * OpenableColumns.DISPLAY_NAME / iOS).
- * Fallback: expo-file-system File.pickFileAsync when DocumentPicker is unavailable.
+ * Pick and import one or more books.
+ * Primary: DocumentPicker with multi-select (keeps display names).
+ * Fallback: single-file File.pickFileAsync.
  */
-export async function pickAndImportBook(): Promise<Book | null> {
+export async function pickAndImportBooks(options?: {
+  isDuplicate?: (book: Book) => Book | undefined;
+  onDuplicate?: (existing: Book, incoming: Book) => 'skip' | 'keep';
+}): Promise<ImportBooksResult> {
   const allowed = await ensureReadPermission();
   if (!allowed) {
     throw new Error(
@@ -420,13 +587,14 @@ export async function pickAndImportBook(): Promise<Book | null> {
     );
   }
 
-  const id = createId();
-  let pickedFile: File | null = null;
-  let name = '';
-  let mimeType: string | null | undefined;
-  let sourceUri: string | null = null;
+  let assets: {
+    name: string;
+    mimeType?: string | null;
+    uri: string;
+    pickedFile?: File | null;
+    size?: number | null;
+  }[] = [];
 
-  // --- Primary: DocumentPicker (preserves original filename) ---
   try {
     const result = await DocumentPicker.getDocumentAsync({
       type: [
@@ -436,26 +604,25 @@ export async function pickAndImportBook(): Promise<Book | null> {
         '*/*',
       ],
       copyToCacheDirectory: true,
-      multiple: false,
+      multiple: true,
     });
-    if (result.canceled || !result.assets?.[0]) return null;
-    const asset = result.assets[0];
-    mimeType = asset.mimeType;
-    sourceUri = asset.uri;
-    name = resolveImportFileName({
-      name: asset.name,
-      uri: asset.uri,
-      mimeType: asset.mimeType,
-      fallbackId: id,
-    });
-    // Expo may need a moment before the cache copy is visible
+    if (result.canceled || !result.assets?.length) {
+      return { books: [], skippedDuplicates: [], errors: [] };
+    }
     await new Promise((r) => setTimeout(r, 200));
+    assets = result.assets.map((asset) => ({
+      name: asset.name,
+      mimeType: asset.mimeType,
+      uri: asset.uri,
+      size: asset.size,
+    }));
   } catch (pickerError) {
     const msg =
       pickerError instanceof Error ? pickerError.message : String(pickerError);
-    if (/cancel/i.test(msg)) return null;
+    if (/cancel/i.test(msg)) {
+      return { books: [], skippedDuplicates: [], errors: [] };
+    }
 
-    // --- Fallback: File.pickFileAsync ---
     const picked = await File.pickFileAsync({
       mimeTypes: [
         'application/pdf',
@@ -464,46 +631,50 @@ export async function pickAndImportBook(): Promise<Book | null> {
         '*/*',
       ],
     });
-    if (picked.canceled || !picked.result) return null;
-    pickedFile = picked.result;
-    mimeType = pickedFile.type;
-    sourceUri = pickedFile.uri;
-    name = resolveImportFileName({
-      name: pickedFile.name,
-      uri: pickedFile.uri,
-      mimeType: pickedFile.type,
-      fallbackId: id,
-    });
-  }
-
-  const fileType = detectType(name, mimeType);
-  if (!fileType) {
-    throw new Error(
-      'Unsupported file type. Please import .pdf, .epub, or .txt files.',
-    );
-  }
-
-  let filePath: string;
-  try {
-    if (pickedFile) {
-      filePath = await persistExpoFile(pickedFile, id, fileType);
-    } else if (sourceUri) {
-      filePath = await persistUri(sourceUri, id, fileType);
-    } else {
-      throw new Error('No file was selected.');
+    if (picked.canceled || !picked.result) {
+      return { books: [], skippedDuplicates: [], errors: [] };
     }
-  } catch (e) {
-    const detail = e instanceof Error ? e.message : String(e);
-    throw new Error(
-      `Could not save the file into the app. ${detail}`,
-    );
+    const file = picked.result;
+    assets = [
+      {
+        name: file.name,
+        mimeType: file.type,
+        uri: file.uri,
+        pickedFile: file,
+        size: file.size,
+      },
+    ];
   }
 
-  return buildBookFromSavedFile({
-    id,
-    name,
-    mimeType,
-    filePath,
-    fileType,
-  });
+  const books: Book[] = [];
+  const skippedDuplicates: string[] = [];
+  const errors: string[] = [];
+  for (const asset of assets) {
+    try {
+      const book = await importPickedAsset(asset);
+      const existing = options?.isDuplicate?.(book);
+      if (existing) {
+        const action = options?.onDuplicate?.(existing, book) ?? 'skip';
+        if (action === 'skip') {
+          skippedDuplicates.push(book.title);
+          continue;
+        }
+      }
+      books.push(book);
+    } catch (e) {
+      errors.push(
+        `${asset.name}: ${e instanceof Error ? e.message : String(e)}`,
+      );
+    }
+  }
+  if (books.length === 0 && errors.length > 0 && skippedDuplicates.length === 0) {
+    throw new Error(errors[0]);
+  }
+  return { books, skippedDuplicates, errors };
+}
+
+/** @deprecated Prefer pickAndImportBooks — kept for call sites expecting one book. */
+export async function pickAndImportBook(): Promise<Book | null> {
+  const { books } = await pickAndImportBooks();
+  return books[0] ?? null;
 }

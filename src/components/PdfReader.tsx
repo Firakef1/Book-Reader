@@ -32,6 +32,8 @@ interface Props {
     paragraphIndex: number;
     text: string;
   }) => void;
+  onTap?: () => void;
+  onOutline?: (items: { title: string; pageIndex: number }[]) => void;
   goToPageRef?: React.MutableRefObject<((page: number) => void) | null>;
   zoomRef?: React.MutableRefObject<((delta: number) => void) | null>;
 }
@@ -56,11 +58,11 @@ function buildPdfJsHtml(
   <script>${pdfJsInline}</script>
   <style>
     html, body { margin:0; padding:0; height:100%; background:${bg}; color:${text};
-      font-family:-apple-system,BlinkMacSystemFont,sans-serif; overflow:hidden; touch-action:manipulation; }
+      font-family:-apple-system,BlinkMacSystemFont,sans-serif; overflow:hidden; }
     #wrap { height:100%; display:flex; flex-direction:column; }
     #status { padding:28px 20px; text-align:center; line-height:1.5; }
-    #viewport { flex:1; overflow:auto; -webkit-overflow-scrolling:touch; display:none; padding:12px; text-align:center; }
-    #viewport.flip { overflow:auto; display:none; align-items:flex-start; justify-content:center; padding:8px; }
+    #viewport { flex:1; overflow:auto; -webkit-overflow-scrolling:touch; display:none; padding:12px; text-align:center; touch-action:pan-y pinch-zoom; }
+    #viewport.flip { overflow:auto; display:none; align-items:flex-start; justify-content:center; padding:8px; touch-action:manipulation; }
     #pages { display:flex; flex-direction:column; align-items:center; gap:14px; padding-bottom:24px; }
     .pageWrap { position:relative; display:inline-block; max-width:100%; }
     canvas { max-width:100%; height:auto!important; background:#fff; box-shadow:0 8px 28px rgba(0,0,0,.22); border-radius:4px; }
@@ -135,7 +137,10 @@ function buildPdfJsHtml(
             if (tc.items[i].str) parts.push(tc.items[i].str);
           }
           var full = parts.join(' ').replace(/\\s+/g, ' ').trim();
-          var text = full.slice(0, 280) || ('Page ' + (pageZero + 1));
+          var snippet = full.slice(0, 120);
+          var text = snippet
+            ? ('Page bookmark · p.' + (pageZero + 1) + ' — ' + snippet)
+            : ('Page bookmark · p.' + (pageZero + 1));
           post('highlight', {
             page: pageZero,
             paragraphIndex: paragraphIndex || 0,
@@ -145,7 +150,7 @@ function buildPdfJsHtml(
           post('highlight', {
             page: pageZero,
             paragraphIndex: paragraphIndex || 0,
-            text: 'Page ' + (pageZero + 1)
+            text: 'Page bookmark · p.' + (pageZero + 1)
           });
         });
       }
@@ -236,11 +241,13 @@ function buildPdfJsHtml(
           var w = window.innerWidth;
           if (e.clientX < w * 0.28) queueFlip(pageNum - 1);
           else if (e.clientX > w * 0.72) queueFlip(pageNum + 1);
+          else post('tap', {});
         });
       }
 
       function setupScrollTracking(viewport) {
         var ticking = false;
+        var moved = false;
         function updateFromScroll() {
           ticking = false;
           if (!acceptPagePosts) return;
@@ -268,6 +275,27 @@ function buildPdfJsHtml(
             postPage(best - 1);
           }
         }
+
+        viewport.addEventListener('touchstart', function (e) {
+          moved = false;
+          if (!e.changedTouches || !e.changedTouches[0]) return;
+          touchStartX = e.changedTouches[0].clientX;
+          touchStartY = e.changedTouches[0].clientY;
+          touchStartAt = Date.now();
+        }, { passive: true });
+
+        viewport.addEventListener('touchmove', function (e) {
+          if (!e.changedTouches || !e.changedTouches[0]) return;
+          var dx = e.changedTouches[0].clientX - touchStartX;
+          var dy = e.changedTouches[0].clientY - touchStartY;
+          if (Math.abs(dx) > 10 || Math.abs(dy) > 10) moved = true;
+        }, { passive: true });
+
+        viewport.addEventListener('touchend', function () {
+          if (moved) return;
+          if (Date.now() - touchStartAt > 350) return;
+          post('tap', {});
+        }, { passive: true });
 
         viewport.addEventListener('scroll', function () {
           if (!ticking) {
@@ -298,6 +326,8 @@ function buildPdfJsHtml(
         acceptPagePosts = false;
         var wraps = {};
         var total = pdfDoc.numPages;
+        var WINDOW = 8;
+        var painted = {};
 
         for (var p = 1; p <= total; p++) {
           (function (num) {
@@ -312,8 +342,11 @@ function buildPdfJsHtml(
         }
 
         function renderOne(num) {
+          if (painted[num]) return Promise.resolve();
+          painted[num] = true;
           return pdfDoc.getPage(num).then(function (page) {
             var wrap = wraps[num];
+            if (!wrap) return;
             var beforeH = wrap.offsetHeight;
             var scrollBefore = viewport ? viewport.scrollTop : 0;
             var canvas = document.createElement('canvas');
@@ -322,33 +355,55 @@ function buildPdfJsHtml(
             wrap.appendChild(canvas);
             wrap.style.minHeight = '';
             return paintPage(page, canvas).then(function () {
-              // Pages above the current one grow and would push us off — keep place
               if (num < pageNum && viewport) {
                 var afterH = wrap.offsetHeight;
                 var delta = afterH - beforeH;
                 if (delta) viewport.scrollTop = scrollBefore + delta;
               }
             });
+          }).catch(function () {
+            painted[num] = false;
           });
         }
 
-        // Resume page first, then fill neighbors without losing place
-        renderOne(startPage).then(function () {
-          jumpToScrollPage(startPage);
-          var order = [];
-          for (var d = 1; d < total; d++) {
-            if (startPage + d <= total) order.push(startPage + d);
-            if (startPage - d >= 1) order.push(startPage - d);
+        function unloadFar(center) {
+          for (var n = 1; n <= total; n++) {
+            if (Math.abs(n - center) <= WINDOW) continue;
+            if (!painted[n]) continue;
+            var wrap = wraps[n];
+            if (!wrap) continue;
+            wrap.innerHTML = '';
+            wrap.style.minHeight = '240px';
+            painted[n] = false;
+          }
+        }
+
+        function ensureWindow(center) {
+          unloadFar(center);
+          var jobs = [];
+          for (var n = Math.max(1, center - WINDOW); n <= Math.min(total, center + WINDOW); n++) {
+            if (!painted[n]) jobs.push(n);
           }
           var i = 0;
           function next() {
-            if (i >= order.length) return;
-            var n = order[i++];
+            if (i >= jobs.length) return;
+            var n = jobs[i++];
             renderOne(n).then(function () { setTimeout(next, 0); }).catch(function () {
               setTimeout(next, 0);
             });
           }
           next();
+        }
+
+        var prevPostPage = postPage;
+        postPage = function (zeroBased, force) {
+          prevPostPage(zeroBased, force);
+          ensureWindow((zeroBased || 0) + 1);
+        };
+
+        renderOne(startPage).then(function () {
+          jumpToScrollPage(startPage);
+          ensureWindow(startPage);
         }).catch(function (e) {
           setStatus('Render error: ' + (e && e.message ? e.message : e));
           post('error', { message: String(e && e.message ? e.message : e) });
@@ -411,6 +466,41 @@ function buildPdfJsHtml(
             acceptPagePosts = false;
             lastPostedPage = -1;
             post('loaded', { totalPages: doc.numPages });
+            if (doc.getOutline) {
+              doc.getOutline().then(function (outline) {
+                if (!outline || !outline.length) return;
+                var items = [];
+                function walk(nodes) {
+                  if (!nodes) return;
+                  for (var i = 0; i < nodes.length; i++) {
+                    var n = nodes[i];
+                    if (!n) continue;
+                    (function (node) {
+                      var title = String(node.title || 'Section').trim();
+                      var dest = node.dest;
+                      function pushPage(zero) {
+                        if (typeof zero === 'number' && zero >= 0) {
+                          items.push({ title: title, pageIndex: zero });
+                        }
+                      }
+                      if (typeof dest === 'string') {
+                        doc.getDestination(dest).then(function (explicit) {
+                          if (!explicit || !explicit[0]) return;
+                          doc.getPageIndex(explicit[0]).then(pushPage).catch(function () {});
+                        }).catch(function () {});
+                      } else if (Array.isArray(dest) && dest[0]) {
+                        doc.getPageIndex(dest[0]).then(pushPage).catch(function () {});
+                      }
+                      if (node.items && node.items.length) walk(node.items);
+                    })(n);
+                  }
+                }
+                walk(outline);
+                setTimeout(function () {
+                  if (items.length) post('outline', { items: items });
+                }, 400);
+              }).catch(function () {});
+            }
             var start = Math.max(1, Math.min(doc.numPages, (startPage || 0) + 1));
             if (MODE === 'flip') {
               var pagesEl = document.getElementById('pages');
@@ -477,6 +567,8 @@ export function PdfReader({
   onPageChange,
   onDocumentLoad,
   onHighlightRequest,
+  onTap,
+  onOutline,
   goToPageRef,
   zoomRef,
 }: Props) {
@@ -497,9 +589,13 @@ export function PdfReader({
   const onPageChangeRef = useRef(onPageChange);
   const onDocumentLoadRef = useRef(onDocumentLoad);
   const onHighlightRequestRef = useRef(onHighlightRequest);
+  const onTapRef = useRef(onTap);
+  const onOutlineRef = useRef(onOutline);
   onPageChangeRef.current = onPageChange;
   onDocumentLoadRef.current = onDocumentLoad;
   onHighlightRequestRef.current = onHighlightRequest;
+  onTapRef.current = onTap;
+  onOutlineRef.current = onOutline;
 
   const resetTransferState = useCallback(() => {
     transferStarted.current = false;
@@ -706,6 +802,7 @@ export function PdfReader({
         message?: string;
         paragraphIndex?: number;
         text?: string;
+        items?: { title: string; pageIndex: number }[];
       };
       if (data.type === 'ready') {
         webReady.current = true;
@@ -722,6 +819,10 @@ export function PdfReader({
           paragraphIndex: data.paragraphIndex ?? 0,
           text: data.text ?? `Page ${data.page + 1}`,
         });
+      } else if (data.type === 'tap') {
+        onTapRef.current?.();
+      } else if (data.type === 'outline' && Array.isArray(data.items)) {
+        onOutlineRef.current?.(data.items);
       } else if (data.type === 'error') {
         setError(data.message ?? 'PDF viewer error');
         setLoading(false);
@@ -772,8 +873,7 @@ export function PdfReader({
             marginTop: 16,
           }}
         >
-          First open may take a moment while the PDF engine starts. Very large
-          files may need a moment to read.
+          Very large files may need a moment to read.
         </Text>
       </View>
     );
@@ -791,6 +891,8 @@ export function PdfReader({
         domStorageEnabled
         mixedContentMode="always"
         setSupportMultipleWindows={false}
+        nestedScrollEnabled
+        scrollEnabled
         style={styles.flex}
         onLoadEnd={() => {
           // Fallback if postMessage ready was missed

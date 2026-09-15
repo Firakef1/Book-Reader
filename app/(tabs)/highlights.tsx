@@ -219,15 +219,18 @@ export default function HighlightsScreen() {
                 “{h.text}”
               </Text>
               <Text style={{ color: theme.textMuted, marginTop: 8 }}>
-                {bookTitle(h.bookId)} · p.{h.page + 1} ·{' '}
-                {formatRelativeTime(h.createdDate)}
+                {bookTitle(h.bookId)} ·{' '}
+                {books.find((b) => b.id === h.bookId)?.fileType === 'pdf'
+                  ? 'bookmark'
+                  : 'highlight'}{' '}
+                · p.{h.page + 1} · {formatRelativeTime(h.createdDate)}
               </Text>
             </Pressable>
           ))}
           {filtered.length === 0 ? (
             <Text style={{ color: theme.textMuted, textAlign: 'center' }}>
-              Long-press a paragraph (or a PDF page) while reading to save a
-              highlight.
+              Long-press a paragraph while reading, or long-press a PDF page to
+              save a page bookmark.
             </Text>
           ) : null}
         </View>

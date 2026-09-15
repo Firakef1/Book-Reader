@@ -38,7 +38,64 @@ export function estimateMinutesRemaining(
 }
 
 export function todayKey(): string {
-  return new Date().toISOString().slice(0, 10);
+  const d = new Date();
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  return `${y}-${m}-${day}`;
+}
+
+/** Local calendar day N days before today (for streak walking). */
+export function localDayKeyOffset(daysBack: number): string {
+  const d = new Date();
+  d.setHours(12, 0, 0, 0);
+  d.setDate(d.getDate() - daysBack);
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  return `${y}-${m}-${day}`;
+}
+
+/**
+ * Map a stable character offset into a page index for the current pagination.
+ */
+export function pageIndexFromContentOffset(
+  content: string,
+  offset: number,
+  charsPerPageValue: number,
+): number {
+  const pages = paginateText(content, charsPerPageValue);
+  if (pages.length === 0) return 0;
+  const target = Math.max(0, Math.min(content.length, offset));
+  let start = 0;
+  for (let i = 0; i < pages.length; i++) {
+    const pageText = pages[i];
+    const idx = content.indexOf(pageText, start);
+    const pageStart = idx >= 0 ? idx : start;
+    const pageEnd = pageStart + pageText.length;
+    if (target >= pageStart && target <= pageEnd) return i;
+    if (target < pageStart) return Math.max(0, i - 1);
+    start = pageEnd;
+  }
+  return Math.max(0, pages.length - 1);
+}
+
+export function contentOffsetFromPageIndex(
+  content: string,
+  pageIndex: number,
+  charsPerPageValue: number,
+): number {
+  const pages = paginateText(content, charsPerPageValue);
+  if (pages.length === 0) return 0;
+  const safe = Math.max(0, Math.min(pages.length - 1, pageIndex));
+  let start = 0;
+  for (let i = 0; i <= safe; i++) {
+    const pageText = pages[i];
+    const idx = content.indexOf(pageText, start);
+    if (i === safe) return Math.max(0, idx >= 0 ? idx : start);
+    start = (idx >= 0 ? idx : start) + pageText.length;
+  }
+  return 0;
 }
 
 export function stripHtml(html: string): string {
@@ -85,9 +142,11 @@ export function getPageParagraphs(pageContent: string): string[] {
 
 /** Resolve shelf category from progress — avoids PDF totalPages=1 false "Done". */
 export function deriveBookStatus(
-  book: { status: BookStatus; totalPages: number },
+  book: { status: BookStatus; totalPages: number; statusLocked?: boolean },
   progress?: { currentPage: number; totalTimeRead: number } | null,
 ): BookStatus {
+  if (book.statusLocked) return book.status;
+
   const page = progress?.currentPage ?? 0;
   const total = Math.max(1, book.totalPages);
   const atEnd = total > 1 && page >= total - 1;
@@ -101,4 +160,30 @@ export function deriveBookStatus(
 
   if (started) return 'reading';
   return 'toRead';
+}
+
+/** Find search hits in flattened text content; returns page + snippet. */
+export function searchInPages(
+  pages: string[],
+  query: string,
+  limit = 40,
+): { page: number; snippet: string }[] {
+  const q = query.trim().toLowerCase();
+  if (!q || pages.length === 0) return [];
+  const hits: { page: number; snippet: string }[] = [];
+  for (let i = 0; i < pages.length; i++) {
+    const lower = pages[i].toLowerCase();
+    let from = 0;
+    while (from < lower.length) {
+      const idx = lower.indexOf(q, from);
+      if (idx < 0) break;
+      const start = Math.max(0, idx - 42);
+      const end = Math.min(pages[i].length, idx + q.length + 42);
+      const snippet = pages[i].slice(start, end).replace(/\s+/g, ' ').trim();
+      hits.push({ page: i, snippet });
+      if (hits.length >= limit) return hits;
+      from = idx + q.length;
+    }
+  }
+  return hits;
 }

@@ -1,6 +1,13 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import { File } from 'expo-file-system';
 import { create } from 'zustand';
 import { createJSONStorage, persist } from 'zustand/middleware';
+import {
+  deleteBookCover,
+  deleteBookTextContent,
+  loadBookTextContent,
+  saveBookTextContent,
+} from '../services/bookContent';
 import { defaultTextPreferences } from '../theme/typography';
 import {
   AppPreferences,
@@ -9,13 +16,21 @@ import {
   DailyStat,
   Highlight,
   HighlightColor,
+  LibraryBackup,
+  LibraryFormatFilter,
   LibrarySort,
+  LibraryStatusFilter,
   PageTurnMode,
   ReadingProgress,
   TextPreferences,
   ThemeId,
 } from '../types';
-import { createId, deriveBookStatus, todayKey } from '../utils/helpers';
+import {
+  createId,
+  deriveBookStatus,
+  localDayKeyOffset,
+  todayKey,
+} from '../utils/helpers';
 
 interface LibraryState {
   books: Book[];
@@ -25,11 +40,18 @@ interface LibraryState {
   dailyStats: DailyStat[];
   hydrated: boolean;
   setHydrated: (value: boolean) => void;
+  hydrateBookContents: () => Promise<void>;
 
   addBook: (book: Book) => void;
   updateBook: (id: string, patch: Partial<Book>) => void;
   deleteBook: (id: string) => void;
   setBookStatus: (id: string, status: BookStatus) => void;
+  findDuplicate: (input: {
+    title: string;
+    fileType: Book['fileType'];
+    sourceName?: string;
+    sourceSize?: number;
+  }) => Book | undefined;
 
   getProgress: (bookId: string) => ReadingProgress | undefined;
   ensureProgress: (bookId: string) => ReadingProgress;
@@ -37,6 +59,7 @@ interface LibraryState {
     bookId: string,
     currentPage: number,
     scrollPosition: number,
+    contentOffset?: number,
   ) => void;
   recordSessionChunk: (
     bookId: string,
@@ -59,7 +82,16 @@ interface LibraryState {
   setFollowSystemTheme: (follow: boolean) => void;
   setTextPreferences: (patch: Partial<TextPreferences>) => void;
   setPageTurnMode: (mode: PageTurnMode) => void;
+  setOpenLastBookOnLaunch: (value: boolean) => void;
+  setKeepScreenAwake: (value: boolean) => void;
+  setLibrarySort: (sort: LibrarySort) => void;
+  setLibraryStatusFilter: (filter: LibraryStatusFilter) => void;
+  setLibraryFormatFilter: (filter: LibraryFormatFilter) => void;
   completeOnboarding: () => void;
+  resetOnboarding: () => void;
+
+  exportBackup: () => LibraryBackup;
+  importBackupMeta: (backup: LibraryBackup) => void;
 
   getSortedBooks: (sort: LibrarySort) => Book[];
   getRecentlyRead: (limit?: number) => Book[];
@@ -80,6 +112,11 @@ const defaultPreferences: AppPreferences = {
   pageTurnMode: 'scroll',
   hasCompletedOnboarding: false,
   lastOpenedBookId: null,
+  openLastBookOnLaunch: true,
+  keepScreenAwake: true,
+  librarySort: 'recentlyRead',
+  libraryStatusFilter: 'all',
+  libraryFormatFilter: 'all',
 };
 
 function emptyProgress(bookId: string): ReadingProgress {
@@ -88,9 +125,27 @@ function emptyProgress(bookId: string): ReadingProgress {
     bookId,
     currentPage: 0,
     scrollPosition: 0,
+    contentOffset: 0,
     lastReadDate: new Date().toISOString(),
     totalTimeRead: 0,
     readingSessions: [],
+  };
+}
+
+function deleteBookFile(filePath?: string | null) {
+  if (!filePath) return;
+  try {
+    const file = new File(filePath);
+    if (file.exists) file.delete();
+  } catch {
+    // Best-effort cleanup
+  }
+}
+
+function stripBookForPersist(book: Book): Book {
+  return {
+    ...book,
+    content: book.fileType === 'pdf' ? '' : '',
   };
 }
 
@@ -105,20 +160,48 @@ export const useLibraryStore = create<LibraryState>()(
       hydrated: false,
       setHydrated: (value) => set({ hydrated: value }),
 
-      addBook: (book) =>
+      hydrateBookContents: async () => {
+        const { books } = get();
+        const next = await Promise.all(
+          books.map(async (book) => {
+            if (book.fileType === 'pdf') return book;
+            if (book.content?.trim()) {
+              void saveBookTextContent(book.id, book.content);
+              return book;
+            }
+            const loaded = await loadBookTextContent(book.id);
+            if (loaded == null) return book;
+            return { ...book, content: loaded };
+          }),
+        );
+        set({ books: next });
+      },
+
+      addBook: (book) => {
+        if (book.content?.trim() && book.fileType !== 'pdf') {
+          void saveBookTextContent(book.id, book.content);
+        }
         set((state) => ({
           books: [book, ...state.books],
           progress: {
             ...state.progress,
             [book.id]: emptyProgress(book.id),
           },
-        })),
+        }));
+      },
 
       updateBook: (id, patch) =>
         set((state) => ({
           books: state.books.map((b) => {
             if (b.id !== id) return b;
             const next = { ...b, ...patch };
+            if (patch.content && next.fileType !== 'pdf') {
+              void saveBookTextContent(id, patch.content);
+            }
+            if (patch.status != null) {
+              return { ...next, statusLocked: true };
+            }
+            if (next.statusLocked) return next;
             const p = state.progress[id];
             return {
               ...next,
@@ -127,7 +210,11 @@ export const useLibraryStore = create<LibraryState>()(
           }),
         })),
 
-      deleteBook: (id) =>
+      deleteBook: (id) => {
+        const book = get().books.find((b) => b.id === id);
+        deleteBookFile(book?.filePath);
+        deleteBookCover(book?.coverImage);
+        deleteBookTextContent(id);
         set((state) => {
           const { [id]: _, ...restProgress } = state.progress;
           return {
@@ -142,12 +229,38 @@ export const useLibraryStore = create<LibraryState>()(
                   : state.preferences.lastOpenedBookId,
             },
           };
-        }),
+        });
+      },
 
       setBookStatus: (id, status) =>
         set((state) => ({
-          books: state.books.map((b) => (b.id === id ? { ...b, status } : b)),
+          books: state.books.map((b) =>
+            b.id === id ? { ...b, status, statusLocked: true } : b,
+          ),
         })),
+
+      findDuplicate: ({ title, fileType, sourceName, sourceSize }) => {
+        const books = get().books;
+        const titleKey = title.trim().toLowerCase();
+        const nameKey = sourceName?.trim().toLowerCase();
+        return books.find((b) => {
+          if (b.fileType !== fileType) return false;
+          if (
+            nameKey &&
+            b.sourceName?.trim().toLowerCase() === nameKey
+          ) {
+            if (sourceSize == null || b.sourceSize == null) return true;
+            return b.sourceSize === sourceSize;
+          }
+          if (b.title.trim().toLowerCase() === titleKey) {
+            if (sourceSize != null && b.sourceSize != null) {
+              return b.sourceSize === sourceSize;
+            }
+            return true;
+          }
+          return false;
+        });
+      },
 
       getProgress: (bookId) => get().progress[bookId],
 
@@ -161,15 +274,22 @@ export const useLibraryStore = create<LibraryState>()(
         return created;
       },
 
-      updateReadingPosition: (bookId, currentPage, scrollPosition) => {
+      updateReadingPosition: (
+        bookId,
+        currentPage,
+        scrollPosition,
+        contentOffset,
+      ) => {
         const now = new Date().toISOString();
         const state = get();
         const prev = state.progress[bookId] ?? emptyProgress(bookId);
+        const nextOffset =
+          contentOffset !== undefined ? contentOffset : prev.contentOffset ?? 0;
 
-        // Avoid no-op updates that recreate objects and infinite-loop React subscribers
         if (
           prev.currentPage === currentPage &&
           prev.scrollPosition === scrollPosition &&
+          (prev.contentOffset ?? 0) === nextOffset &&
           state.preferences.lastOpenedBookId === bookId
         ) {
           const last = new Date(prev.lastReadDate).getTime();
@@ -181,7 +301,7 @@ export const useLibraryStore = create<LibraryState>()(
         let booksChanged = false;
         const books = state.books.map((b) => {
           if (b.id !== bookId) return b;
-          // Any progress update means the book is being read (unless finished)
+          if (b.statusLocked) return b;
           const status = deriveBookStatus(
             { ...b, status: 'reading' },
             { currentPage, totalTimeRead: prev.totalTimeRead },
@@ -199,6 +319,7 @@ export const useLibraryStore = create<LibraryState>()(
               ...prev,
               currentPage,
               scrollPosition,
+              contentOffset: nextOffset,
               lastReadDate: now,
             },
           },
@@ -306,6 +427,31 @@ export const useLibraryStore = create<LibraryState>()(
           preferences: { ...state.preferences, pageTurnMode: mode },
         })),
 
+      setOpenLastBookOnLaunch: (value) =>
+        set((state) => ({
+          preferences: { ...state.preferences, openLastBookOnLaunch: value },
+        })),
+
+      setKeepScreenAwake: (value) =>
+        set((state) => ({
+          preferences: { ...state.preferences, keepScreenAwake: value },
+        })),
+
+      setLibrarySort: (sort) =>
+        set((state) => ({
+          preferences: { ...state.preferences, librarySort: sort },
+        })),
+
+      setLibraryStatusFilter: (filter) =>
+        set((state) => ({
+          preferences: { ...state.preferences, libraryStatusFilter: filter },
+        })),
+
+      setLibraryFormatFilter: (filter) =>
+        set((state) => ({
+          preferences: { ...state.preferences, libraryFormatFilter: filter },
+        })),
+
       completeOnboarding: () =>
         set((state) => ({
           preferences: {
@@ -313,6 +459,45 @@ export const useLibraryStore = create<LibraryState>()(
             hasCompletedOnboarding: true,
           },
         })),
+
+      resetOnboarding: () =>
+        set((state) => ({
+          preferences: {
+            ...state.preferences,
+            hasCompletedOnboarding: false,
+          },
+        })),
+
+      exportBackup: () => {
+        const state = get();
+        return {
+          version: 1 as const,
+          exportedAt: new Date().toISOString(),
+          books: state.books.map(stripBookForPersist),
+          progress: state.progress,
+          highlights: state.highlights,
+          preferences: state.preferences,
+          dailyStats: state.dailyStats,
+        };
+      },
+
+      importBackupMeta: (backup) => {
+        if (!backup || backup.version !== 1) return;
+        set({
+          books: (backup.books ?? []).map((b) => ({
+            ...b,
+            content: b.content ?? '',
+          })),
+          progress: backup.progress ?? {},
+          highlights: backup.highlights ?? [],
+          preferences: {
+            ...defaultPreferences,
+            ...backup.preferences,
+          },
+          dailyStats: backup.dailyStats ?? [],
+        });
+        void get().hydrateBookContents();
+      },
 
       getSortedBooks: (sort) => {
         const { books, progress } = get();
@@ -361,7 +546,9 @@ export const useLibraryStore = create<LibraryState>()(
       getLastReadBook: () => {
         const { preferences, books, progress } = get();
         if (preferences.lastOpenedBookId) {
-          const found = books.find((b) => b.id === preferences.lastOpenedBookId);
+          const found = books.find(
+            (b) => b.id === preferences.lastOpenedBookId,
+          );
           if (found) return found;
         }
         const sorted = get().getSortedBooks('recentlyRead');
@@ -398,12 +585,10 @@ export const useLibraryStore = create<LibraryState>()(
           dailyStats.filter((d) => d.pagesRead > 0).map((d) => d.date),
         );
         let streak = 0;
-        const cursor = new Date();
-        for (;;) {
-          const key = cursor.toISOString().slice(0, 10);
+        for (let i = 0; ; i++) {
+          const key = localDayKeyOffset(i);
           if (!days.has(key)) break;
           streak += 1;
-          cursor.setDate(cursor.getDate() - 1);
         }
 
         const totalMinutes = Object.values(progress).reduce(
@@ -424,7 +609,7 @@ export const useLibraryStore = create<LibraryState>()(
       name: 'bookreader-storage',
       storage: createJSONStorage(() => AsyncStorage),
       partialize: (state) => ({
-        books: state.books,
+        books: state.books.map(stripBookForPersist),
         progress: state.progress,
         highlights: state.highlights,
         preferences: state.preferences,
@@ -432,11 +617,28 @@ export const useLibraryStore = create<LibraryState>()(
       }),
       onRehydrateStorage: () => (state) => {
         if (!state) return;
-        let preferences = state.preferences;
+        let preferences = {
+          ...defaultPreferences,
+          ...state.preferences,
+        };
         if (!preferences.pageTurnMode) {
           preferences = { ...preferences, pageTurnMode: 'scroll' };
         }
-        // Legacy default was light + follow system; move to Ink editorial look
+        if (preferences.openLastBookOnLaunch == null) {
+          preferences = { ...preferences, openLastBookOnLaunch: true };
+        }
+        if (preferences.keepScreenAwake == null) {
+          preferences = { ...preferences, keepScreenAwake: true };
+        }
+        if (!preferences.librarySort) {
+          preferences = { ...preferences, librarySort: 'recentlyRead' };
+        }
+        if (!preferences.libraryStatusFilter) {
+          preferences = { ...preferences, libraryStatusFilter: 'all' };
+        }
+        if (!preferences.libraryFormatFilter) {
+          preferences = { ...preferences, libraryFormatFilter: 'all' };
+        }
         if (preferences.followSystemTheme) {
           preferences = {
             ...preferences,
@@ -445,12 +647,14 @@ export const useLibraryStore = create<LibraryState>()(
           };
         }
         state.preferences = preferences;
-        // Repair false "Done" tags from PDF totalPages=1 race
         state.books = state.books.map((b) => ({
           ...b,
-          status: deriveBookStatus(b, state.progress[b.id]),
+          status: b.statusLocked
+            ? b.status
+            : deriveBookStatus(b, state.progress[b.id]),
         }));
         state.setHydrated(true);
+        void state.hydrateBookContents();
       },
     },
   ),

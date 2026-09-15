@@ -45,8 +45,6 @@ export default function OnboardingScreen() {
       <View style={styles.content}>
         <View style={styles.dashes}>
           <View style={[styles.dashActive, { backgroundColor: theme.accent }]} />
-          <View style={[styles.dash, { backgroundColor: theme.border }]} />
-          <View style={[styles.dash, { backgroundColor: theme.border }]} />
         </View>
 
         <Text
@@ -182,11 +180,6 @@ const styles = StyleSheet.create({
   },
   dashActive: {
     width: 28,
-    height: 3,
-    borderRadius: 99,
-  },
-  dash: {
-    width: 10,
     height: 3,
     borderRadius: 99,
   },

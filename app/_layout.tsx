@@ -15,12 +15,15 @@ import {
 } from '@expo-google-fonts/source-sans-3';
 import { useLibraryStore } from '../src/store/libraryStore';
 import { useAppTheme } from '../src/hooks/useAppTheme';
+import Constants from 'expo-constants';
 
-const BRAND_BLUE = '#4F7AF6';
+const INK = '#0A0A0A';
 const MIN_BRAND_MS = 900;
 
 SplashScreen.preventAutoHideAsync().catch(() => {});
-SplashScreen.setOptions({ duration: 450, fade: true });
+if (Constants.appOwnership !== 'expo') {
+  SplashScreen.setOptions({ duration: 450, fade: true });
+}
 
 function BrandSplash() {
   return (
@@ -42,10 +45,18 @@ export default function RootLayout() {
   const hasOnboarded = useLibraryStore(
     (s) => s.preferences.hasCompletedOnboarding,
   );
+  const openLastBookOnLaunch = useLibraryStore(
+    (s) => s.preferences.openLastBookOnLaunch !== false,
+  );
+  const lastOpenedBookId = useLibraryStore(
+    (s) => s.preferences.lastOpenedBookId,
+  );
+  const books = useLibraryStore((s) => s.books);
   const router = useRouter();
   const segments = useSegments();
   const brandShownAt = useRef<number | null>(null);
   const [brandDone, setBrandDone] = useState(false);
+  const didAutoOpen = useRef(false);
 
   const [fontsLoaded] = useFonts({
     Literata_400Regular,
@@ -78,10 +89,34 @@ export default function RootLayout() {
     const inOnboarding = segments[0] === 'onboarding';
     if (!hasOnboarded && !inOnboarding) {
       router.replace('/onboarding');
-    } else if (hasOnboarded && inOnboarding) {
-      router.replace('/(tabs)');
+      return;
     }
-  }, [ready, hasOnboarded, segments, router]);
+    if (hasOnboarded && inOnboarding) {
+      router.replace('/(tabs)');
+      return;
+    }
+
+    if (
+      hasOnboarded &&
+      !didAutoOpen.current &&
+      openLastBookOnLaunch &&
+      lastOpenedBookId &&
+      books.some((b) => b.id === lastOpenedBookId) &&
+      segments[0] !== 'reader'
+    ) {
+      didAutoOpen.current = true;
+      // Push (don't replace) so Library stays under the reader and Back works.
+      router.push(`/reader/${lastOpenedBookId}`);
+    }
+  }, [
+    ready,
+    hasOnboarded,
+    segments,
+    router,
+    openLastBookOnLaunch,
+    lastOpenedBookId,
+    books,
+  ]);
 
   if (!ready) {
     if (!fontsLoaded) {
@@ -92,7 +127,9 @@ export default function RootLayout() {
 
   return (
     <>
-      <StatusBar style={theme.id === 'light' || theme.id === 'sepia' ? 'dark' : 'light'} />
+      <StatusBar
+        style={theme.id === 'light' || theme.id === 'sepia' ? 'dark' : 'light'}
+      />
       <Stack
         screenOptions={{
           headerShown: false,
@@ -116,7 +153,7 @@ const styles = StyleSheet.create({
     flex: 1,
     alignItems: 'center',
     justifyContent: 'center',
-    backgroundColor: BRAND_BLUE,
+    backgroundColor: INK,
     paddingHorizontal: 32,
   },
   splashLogo: {
@@ -134,6 +171,6 @@ const styles = StyleSheet.create({
     marginTop: 8,
     fontFamily: 'SourceSans3_400Regular',
     fontSize: 16,
-    color: 'rgba(255,255,255,0.82)',
+    color: 'rgba(255,255,255,0.72)',
   },
 });
