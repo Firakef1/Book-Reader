@@ -14,24 +14,34 @@ import { highlightColors } from '../../src/theme/colors';
 import { useAppTheme } from '../../src/hooks/useAppTheme';
 import { useLibraryStore } from '../../src/store/libraryStore';
 import { HighlightColor } from '../../src/types';
-import { formatRelativeTime } from '../../src/utils/helpers';
+import { formatRelativeTime, getBookVault } from '../../src/utils/helpers';
 
 export default function HighlightsScreen() {
   const theme = useAppTheme();
   const router = useRouter();
   const highlights = useLibraryStore((s) => s.highlights);
-  const books = useLibraryStore((s) => s.books);
+  const allBooks = useLibraryStore((s) => s.books);
+  const books = useMemo(
+    () => allBooks.filter((b) => getBookVault(b) === 'public'),
+    [allBooks],
+  );
   const removeHighlight = useLibraryStore((s) => s.removeHighlight);
   const [colorFilter, setColorFilter] = useState<HighlightColor | 'all'>('all');
   const [bookFilter, setBookFilter] = useState<string | 'all'>('all');
 
+  const publicBookIds = useMemo(
+    () => new Set(books.map((b) => b.id)),
+    [books],
+  );
+
   const filtered = useMemo(() => {
     return highlights.filter((h) => {
+      if (!publicBookIds.has(h.bookId)) return false;
       if (colorFilter !== 'all' && h.color !== colorFilter) return false;
       if (bookFilter !== 'all' && h.bookId !== bookFilter) return false;
       return true;
     });
-  }, [highlights, colorFilter, bookFilter]);
+  }, [highlights, colorFilter, bookFilter, publicBookIds]);
 
   const bookTitle = (id: string) =>
     books.find((b) => b.id === id)?.title ?? 'Unknown book';

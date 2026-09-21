@@ -21,11 +21,13 @@ import { HighlightPicker } from '../../src/components/HighlightPicker';
 import { PdfReader } from '../../src/components/PdfReader';
 import { useAppTheme } from '../../src/hooks/useAppTheme';
 import { useLibraryStore } from '../../src/store/libraryStore';
+import { useVaultStore } from '../../src/store/vaultStore';
 import { FontFamily, HighlightColor, PdfOutlineItem } from '../../src/types';
 import {
   contentOffsetFromPageIndex,
   estimateMinutesRemaining,
   formatMinutes,
+  getBookVault,
   getPageParagraphs,
   pageIndexFromContentOffset,
   paginateText,
@@ -63,6 +65,16 @@ export default function ReaderScreen() {
   const updateBook = useLibraryStore((s) => s.updateBook);
   const setTextPreferences = useLibraryStore((s) => s.setTextPreferences);
   const setPageTurnMode = useLibraryStore((s) => s.setPageTurnMode);
+  const unlockedVault = useVaultStore((s) => s.unlockedVault);
+
+  useEffect(() => {
+    if (!book) return;
+    const vault = getBookVault(book);
+    if (vault === 'public') return;
+    if (unlockedVault !== vault) {
+      router.replace('/(tabs)');
+    }
+  }, [book, unlockedVault, router]);
 
   const pageTurnMode = preferences.pageTurnMode ?? 'scroll';
   const keepAwake = preferences.keepScreenAwake !== false;

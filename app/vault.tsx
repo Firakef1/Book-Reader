@@ -1,4 +1,4 @@
-import React, { useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import {
   Alert,
   Pressable,
@@ -10,27 +10,28 @@ import {
 } from 'react-native';
 import { useRouter } from 'expo-router';
 import { SafeAreaView } from 'react-native-safe-area-context';
-import { BookCoverCard } from '../../src/components/BookCoverCard';
-import { EditBookModal } from '../../src/components/EditBookModal';
-import { MiniBookCard } from '../../src/components/MiniBookCard';
-import { VaultAuthModal } from '../../src/components/VaultAuthModal';
-import { useAppTheme } from '../../src/hooks/useAppTheme';
-import { pickAndImportBooks } from '../../src/services/bookImport';
-import { useLibraryStore } from '../../src/store/libraryStore';
+import { BookCoverCard } from '../src/components/BookCoverCard';
+import { EditBookModal } from '../src/components/EditBookModal';
+import { MiniBookCard } from '../src/components/MiniBookCard';
+import { MoveFromLibraryModal } from '../src/components/MoveFromLibraryModal';
+import { useAppTheme } from '../src/hooks/useAppTheme';
+import { pickAndImportBooks } from '../src/services/bookImport';
+import { useLibraryStore } from '../src/store/libraryStore';
+import { useVaultStore } from '../src/store/vaultStore';
 import {
   Book,
   BookStatus,
+  BookVault,
   LibraryFormatFilter,
   LibrarySort,
   LibraryStatusFilter,
-} from '../../src/types';
+} from '../src/types';
 import {
+  deriveBookStatus,
   estimateMinutesRemaining,
   formatMinutes,
   formatRelativeTime,
-  deriveBookStatus,
-  getBookVault,
-} from '../../src/utils/helpers';
+} from '../src/utils/helpers';
 
 const sortOptions: { label: string; value: LibrarySort }[] = [
   { label: 'Recent', value: 'recentlyRead' },
@@ -39,24 +40,25 @@ const sortOptions: { label: string; value: LibrarySort }[] = [
   { label: 'Progress', value: 'progress' },
 ];
 
-export default function LibraryScreen() {
+export default function VaultScreen() {
   const theme = useAppTheme();
   const router = useRouter();
+  const unlockedVault = useVaultStore((s) => s.unlockedVault);
+  const lock = useVaultStore((s) => s.lock);
+  const setSuspendAutoLock = useVaultStore((s) => s.setSuspendAutoLock);
+
   const preferences = useLibraryStore((s) => s.preferences);
   const sort = preferences.librarySort ?? 'recentlyRead';
-  const statusFilter =
-    (preferences.libraryStatusFilter as LibraryStatusFilter) ?? 'all';
-  const formatFilter =
-    (preferences.libraryFormatFilter as LibraryFormatFilter) ?? 'all';
+  const [statusFilter, setStatusFilter] =
+    useState<LibraryStatusFilter>('all');
+  const [formatFilter, setFormatFilter] =
+    useState<LibraryFormatFilter>('all');
+  const [localSort, setLocalSort] = useState<LibrarySort>(sort);
   const [query, setQuery] = useState('');
   const [importing, setImporting] = useState(false);
-  const [vaultAuthOpen, setVaultAuthOpen] = useState(false);
+  const [moveOpen, setMoveOpen] = useState(false);
+  const [editingBook, setEditingBook] = useState<Book | null>(null);
 
-  const allBooks = useLibraryStore((s) => s.books);
-  const books = useMemo(
-    () => allBooks.filter((b) => getBookVault(b) === 'public'),
-    [allBooks],
-  );
   const progress = useLibraryStore((s) => s.progress);
   const getSortedBooks = useLibraryStore((s) => s.getSortedBooks);
   const getRecentlyRead = useLibraryStore((s) => s.getRecentlyRead);
@@ -66,13 +68,24 @@ export default function LibraryScreen() {
   const updateBook = useLibraryStore((s) => s.updateBook);
   const setBookStatus = useLibraryStore((s) => s.setBookStatus);
   const findDuplicate = useLibraryStore((s) => s.findDuplicate);
-  const setLibrarySort = useLibraryStore((s) => s.setLibrarySort);
-  const setLibraryStatusFilter = useLibraryStore((s) => s.setLibraryStatusFilter);
-  const setLibraryFormatFilter = useLibraryStore((s) => s.setLibraryFormatFilter);
+  const moveBookToVault = useLibraryStore((s) => s.moveBookToVault);
+  const allBooks = useLibraryStore((s) => s.books);
 
-  const lastBook = getLastReadBook('public');
-  const recent = getRecentlyRead(8, 'public');
-  const [editingBook, setEditingBook] = useState<Book | null>(null);
+  const vault: BookVault = unlockedVault ?? 'private';
+
+  useEffect(() => {
+    if (!unlockedVault) {
+      router.replace('/(tabs)');
+    }
+  }, [unlockedVault, router]);
+
+  const books = useMemo(
+    () => allBooks.filter((b) => (b.vault ?? 'public') === vault),
+    [allBooks, vault],
+  );
+
+  const lastBook = getLastReadBook(vault);
+  const recent = getRecentlyRead(8, vault);
 
   const counts = useMemo(() => {
     const base = { all: books.length, reading: 0, toRead: 0, completed: 0 };
@@ -84,7 +97,7 @@ export default function LibraryScreen() {
   }, [books, progress]);
 
   const filtered = useMemo(() => {
-    let list = getSortedBooks(sort, 'public');
+    let list = getSortedBooks(localSort, vault);
     if (statusFilter !== 'all') {
       list = list.filter(
         (b) => deriveBookStatus(b, progress[b.id]) === statusFilter,
@@ -102,13 +115,28 @@ export default function LibraryScreen() {
       );
     }
     return list;
-  }, [books, progress, sort, statusFilter, formatFilter, query, getSortedBooks]);
+  }, [
+    books,
+    progress,
+    localSort,
+    statusFilter,
+    formatFilter,
+    query,
+    getSortedBooks,
+    vault,
+  ]);
+
+  const leaveVault = () => {
+    lock();
+    router.replace('/(tabs)');
+  };
 
   const openBook = (id: string) => router.push(`/reader/${id}`);
 
   const handleImport = async () => {
     try {
       setImporting(true);
+      setSuspendAutoLock(true);
       const result = await pickAndImportBooks({
         isDuplicate: (book) =>
           findDuplicate({
@@ -116,7 +144,7 @@ export default function LibraryScreen() {
             fileType: book.fileType,
             sourceName: book.sourceName,
             sourceSize: book.sourceSize,
-            vault: 'public',
+            vault,
           }),
         onDuplicate: () => 'skip',
       });
@@ -127,7 +155,9 @@ export default function LibraryScreen() {
       ) {
         return;
       }
-      for (const book of result.books) addBook({ ...book, vault: 'public' });
+      for (const book of result.books) {
+        addBook({ ...book, vault });
+      }
       const parts: string[] = [];
       if (result.books.length === 1) {
         parts.push(`"${result.books[0].title}" was added.`);
@@ -152,8 +182,23 @@ export default function LibraryScreen() {
         error instanceof Error ? error.message : 'Could not import that file.',
       );
     } finally {
+      setSuspendAutoLock(false);
       setImporting(false);
     }
+  };
+
+  const openAddMenu = () => {
+    Alert.alert('Add books', undefined, [
+      { text: 'Cancel', style: 'cancel' },
+      {
+        text: 'Import from files',
+        onPress: () => void handleImport(),
+      },
+      {
+        text: 'Move from library',
+        onPress: () => setMoveOpen(true),
+      },
+    ]);
   };
 
   const confirmDelete = (id: string, title: string) => {
@@ -185,6 +230,10 @@ export default function LibraryScreen() {
         onPress: () => setBookStatus(book.id, 'completed' as BookStatus),
       },
       {
+        text: 'Move to library',
+        onPress: () => moveBookToVault(book.id, 'public'),
+      },
+      {
         text: 'Delete',
         style: 'destructive',
         onPress: () => confirmDelete(book.id, book.title),
@@ -213,6 +262,10 @@ export default function LibraryScreen() {
     );
   }, [lastBook, progress]);
 
+  if (!unlockedVault) {
+    return <View style={[styles.safe, { backgroundColor: theme.background }]} />;
+  }
+
   return (
     <SafeAreaView
       style={[styles.safe, { backgroundColor: theme.background }]}
@@ -221,16 +274,14 @@ export default function LibraryScreen() {
       <ScrollView contentContainerStyle={styles.content}>
         <View style={styles.headerRow}>
           <View style={{ flex: 1 }}>
-            <Pressable onLongPress={() => setVaultAuthOpen(true)} delayLongPress={2000}>
-              <Text
-                style={[
-                  styles.brand,
-                  { color: theme.text, fontFamily: 'Literata_700Bold' },
-                ]}
-              >
-                My Library
-              </Text>
-            </Pressable>
+            <Text
+              style={[
+                styles.brand,
+                { color: theme.text, fontFamily: 'Literata_700Bold' },
+              ]}
+            >
+              My Library
+            </Text>
             <Text
               style={{
                 color: theme.textMuted,
@@ -245,7 +296,21 @@ export default function LibraryScreen() {
             </Text>
           </View>
           <Pressable
-            onPress={handleImport}
+            onPress={leaveVault}
+            style={[styles.closeBtn, { borderColor: theme.border }]}
+          >
+            <Text
+              style={{
+                color: theme.textSecondary,
+                fontFamily: 'SourceSans3_600SemiBold',
+                fontSize: 13,
+              }}
+            >
+              Close
+            </Text>
+          </Pressable>
+          <Pressable
+            onPress={openAddMenu}
             style={[styles.importBtn, { backgroundColor: theme.accent }]}
           >
             <Text style={[styles.importText, { color: theme.onAccent }]}>
@@ -262,7 +327,9 @@ export default function LibraryScreen() {
               progressPercent={progressFor(lastBook.id, lastBook.totalPages)}
               pageLabel={[
                 `Page ${(progress[lastBook.id]?.currentPage ?? 0) + 1} of ${lastBook.totalPages}`,
-                lastBookEta != null ? `~${formatMinutes(lastBookEta)} left` : null,
+                lastBookEta != null
+                  ? `~${formatMinutes(lastBookEta)} left`
+                  : null,
               ]
                 .filter(Boolean)
                 .join(' · ')}
@@ -304,7 +371,7 @@ export default function LibraryScreen() {
               Import a PDF, EPUB, or TXT file from your phone to begin reading.
             </Text>
             <Pressable
-              onPress={handleImport}
+              onPress={openAddMenu}
               style={[
                 styles.importBtn,
                 { backgroundColor: theme.accent, alignSelf: 'flex-start' },
@@ -330,7 +397,7 @@ export default function LibraryScreen() {
             return (
               <Pressable
                 key={value}
-                onPress={() => setLibraryStatusFilter(value)}
+                onPress={() => setStatusFilter(value)}
                 style={[
                   styles.categoryCard,
                   {
@@ -339,48 +406,25 @@ export default function LibraryScreen() {
                   },
                 ]}
               >
-                <View style={styles.rivetRow}>
-                  <View
-                    style={[
-                      styles.rivet,
-                      {
-                        backgroundColor: active
-                          ? theme.onAccent
-                          : theme.textMuted,
-                      },
-                    ]}
-                  />
-                  <View
-                    style={[
-                      styles.rivet,
-                      {
-                        backgroundColor: active
-                          ? theme.onAccent
-                          : theme.textMuted,
-                      },
-                    ]}
-                  />
-                </View>
                 <Text
                   style={{
-                    color: active ? theme.onAccent : theme.textMuted,
+                    color: active ? theme.onAccent : theme.text,
+                    fontFamily: 'SourceSans3_700Bold',
+                    fontSize: 22,
+                  }}
+                >
+                  {count}
+                </Text>
+                <Text
+                  style={{
+                    color: active ? theme.onAccent : theme.textSecondary,
                     fontFamily: 'SourceSans3_600SemiBold',
-                    fontSize: 11,
-                    letterSpacing: 1.4,
+                    fontSize: 12,
+                    letterSpacing: 0.6,
                     textTransform: 'uppercase',
                   }}
                 >
                   {label}
-                </Text>
-                <Text
-                  style={{
-                    color: active ? theme.onAccent : theme.text,
-                    fontFamily: 'Literata_700Bold',
-                    fontSize: 28,
-                    marginTop: 8,
-                  }}
-                >
-                  {count}
                 </Text>
               </Pressable>
             );
@@ -395,7 +439,7 @@ export default function LibraryScreen() {
                 { color: theme.text, fontFamily: 'Literata_700Bold' },
               ]}
             >
-              Recently Read
+              Recently read
             </Text>
             <ScrollView
               horizontal
@@ -425,7 +469,7 @@ export default function LibraryScreen() {
               Shelf
             </Text>
             {books.length > 0 ? (
-              <Pressable onPress={handleImport}>
+              <Pressable onPress={openAddMenu}>
                 <Text
                   style={{
                     color: theme.textSecondary,
@@ -471,7 +515,7 @@ export default function LibraryScreen() {
               return (
                 <Pressable
                   key={value}
-                  onPress={() => setLibraryFormatFilter(value)}
+                  onPress={() => setFormatFilter(value as LibraryFormatFilter)}
                   style={[
                     styles.chip,
                     {
@@ -498,11 +542,15 @@ export default function LibraryScreen() {
 
           <View style={styles.sortRow}>
             {sortOptions.map((opt) => (
-              <Pressable key={opt.value} onPress={() => setLibrarySort(opt.value)}>
+              <Pressable
+                key={opt.value}
+                onPress={() => setLocalSort(opt.value)}
+              >
                 <Text
                   style={{
-                    color: sort === opt.value ? theme.text : theme.textMuted,
-                    fontWeight: sort === opt.value ? '700' : '500',
+                    color:
+                      localSort === opt.value ? theme.text : theme.textMuted,
+                    fontWeight: localSort === opt.value ? '700' : '500',
                     fontSize: 12,
                     letterSpacing: 0.4,
                     fontFamily: 'SourceSans3_600SemiBold',
@@ -551,13 +599,10 @@ export default function LibraryScreen() {
           setEditingBook(null);
         }}
       />
-      <VaultAuthModal
-        visible={vaultAuthOpen}
-        onClose={() => setVaultAuthOpen(false)}
-        onUnlocked={() => {
-          setVaultAuthOpen(false);
-          router.push('/vault');
-        }}
+      <MoveFromLibraryModal
+        visible={moveOpen}
+        targetVault={vault}
+        onClose={() => setMoveOpen(false)}
       />
     </SafeAreaView>
   );
@@ -570,9 +615,15 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
-    gap: 12,
+    gap: 10,
   },
   brand: { fontSize: 36 },
+  closeBtn: {
+    paddingHorizontal: 14,
+    paddingVertical: 12,
+    borderRadius: 999,
+    borderWidth: StyleSheet.hairlineWidth,
+  },
   importBtn: {
     paddingHorizontal: 18,
     paddingVertical: 12,
@@ -600,17 +651,9 @@ const styles = StyleSheet.create({
     borderRadius: 18,
     borderWidth: StyleSheet.hairlineWidth,
     padding: 14,
-    minHeight: 104,
-  },
-  rivetRow: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    marginBottom: 10,
-  },
-  rivet: {
-    width: 3,
-    height: 3,
-    borderRadius: 99,
+    minHeight: 88,
+    gap: 6,
+    justifyContent: 'flex-end',
   },
   section: { gap: 14 },
   shelfHeader: {

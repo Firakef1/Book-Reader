@@ -1,4 +1,5 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import { Platform } from 'react-native';
 import { File } from 'expo-file-system';
 import { create } from 'zustand';
 import { createJSONStorage, persist } from 'zustand/middleware';
@@ -13,6 +14,7 @@ import {
   AppPreferences,
   Book,
   BookStatus,
+  BookVault,
   DailyStat,
   Highlight,
   HighlightColor,
@@ -28,6 +30,7 @@ import {
 import {
   createId,
   deriveBookStatus,
+  getBookVault,
   localDayKeyOffset,
   todayKey,
 } from '../utils/helpers';
@@ -51,7 +54,10 @@ interface LibraryState {
     fileType: Book['fileType'];
     sourceName?: string;
     sourceSize?: number;
+    vault?: BookVault;
   }) => Book | undefined;
+
+  moveBookToVault: (id: string, vault: BookVault) => void;
 
   getProgress: (bookId: string) => ReadingProgress | undefined;
   ensureProgress: (bookId: string) => ReadingProgress;
@@ -93,9 +99,9 @@ interface LibraryState {
   exportBackup: () => LibraryBackup;
   importBackupMeta: (backup: LibraryBackup) => void;
 
-  getSortedBooks: (sort: LibrarySort) => Book[];
-  getRecentlyRead: (limit?: number) => Book[];
-  getLastReadBook: () => Book | null;
+  getSortedBooks: (sort: LibrarySort, vault?: BookVault) => Book[];
+  getRecentlyRead: (limit?: number, vault?: BookVault) => Book[];
+  getLastReadBook: (vault?: BookVault) => Book | null;
   getStatsSummary: () => {
     pagesToday: number;
     booksCompleted: number;
@@ -133,7 +139,7 @@ function emptyProgress(bookId: string): ReadingProgress {
 }
 
 function deleteBookFile(filePath?: string | null) {
-  if (!filePath) return;
+  if (!filePath || Platform.OS === 'web') return;
   try {
     const file = new File(filePath);
     if (file.exists) file.delete();
@@ -143,9 +149,13 @@ function deleteBookFile(filePath?: string | null) {
 }
 
 function stripBookForPersist(book: Book): Book {
+  // Native: text bodies live on disk. Web has no document FS, so keep content.
+  if (Platform.OS === 'web' && book.fileType !== 'pdf') {
+    return book;
+  }
   return {
     ...book,
-    content: book.fileType === 'pdf' ? '' : '',
+    content: '',
   };
 }
 
@@ -181,8 +191,12 @@ export const useLibraryStore = create<LibraryState>()(
         if (book.content?.trim() && book.fileType !== 'pdf') {
           void saveBookTextContent(book.id, book.content);
         }
+        const withVault: Book = {
+          ...book,
+          vault: book.vault ?? 'public',
+        };
         set((state) => ({
-          books: [book, ...state.books],
+          books: [withVault, ...state.books],
           progress: {
             ...state.progress,
             [book.id]: emptyProgress(book.id),
@@ -239,11 +253,13 @@ export const useLibraryStore = create<LibraryState>()(
           ),
         })),
 
-      findDuplicate: ({ title, fileType, sourceName, sourceSize }) => {
+      findDuplicate: ({ title, fileType, sourceName, sourceSize, vault }) => {
         const books = get().books;
         const titleKey = title.trim().toLowerCase();
         const nameKey = sourceName?.trim().toLowerCase();
+        const scope = vault ?? 'public';
         return books.find((b) => {
+          if (getBookVault(b) !== scope) return false;
           if (b.fileType !== fileType) return false;
           if (
             nameKey &&
@@ -261,6 +277,13 @@ export const useLibraryStore = create<LibraryState>()(
           return false;
         });
       },
+
+      moveBookToVault: (id, vault) =>
+        set((state) => ({
+          books: state.books.map((b) =>
+            b.id === id ? { ...b, vault } : b,
+          ),
+        })),
 
       getProgress: (bookId) => get().progress[bookId],
 
@@ -335,26 +358,33 @@ export const useLibraryStore = create<LibraryState>()(
         const now = new Date().toISOString();
         const day = todayKey();
         set((state) => {
+          const book = state.books.find((b) => b.id === bookId);
+          const countInPublicStats =
+            !book || getBookVault(book) === 'public';
           const prev = state.progress[bookId] ?? emptyProgress(bookId);
           const session = {
             startTime: new Date(Date.now() - minutes * 60000).toISOString(),
             endTime: now,
             pagesRead: Math.max(0, pagesRead),
           };
-          const daily = [...state.dailyStats];
-          const idx = daily.findIndex((d) => d.date === day);
-          if (idx >= 0) {
-            daily[idx] = {
-              ...daily[idx],
-              pagesRead: daily[idx].pagesRead + Math.max(0, pagesRead),
-              minutesRead: daily[idx].minutesRead + Math.max(0, minutes),
-            };
-          } else {
-            daily.push({
-              date: day,
-              pagesRead: Math.max(0, pagesRead),
-              minutesRead: Math.max(0, minutes),
-            });
+          let daily = state.dailyStats;
+          if (countInPublicStats) {
+            daily = [...state.dailyStats];
+            const idx = daily.findIndex((d) => d.date === day);
+            if (idx >= 0) {
+              daily[idx] = {
+                ...daily[idx],
+                pagesRead: daily[idx].pagesRead + Math.max(0, pagesRead),
+                minutesRead: daily[idx].minutesRead + Math.max(0, minutes),
+              };
+            } else {
+              daily.push({
+                date: day,
+                pagesRead: Math.max(0, pagesRead),
+                minutesRead: Math.max(0, minutes),
+              });
+            }
+            daily = daily.slice(-120);
           }
           return {
             progress: {
@@ -366,7 +396,7 @@ export const useLibraryStore = create<LibraryState>()(
                 lastReadDate: now,
               },
             },
-            dailyStats: daily.slice(-120),
+            dailyStats: daily,
           };
         });
       },
@@ -499,9 +529,9 @@ export const useLibraryStore = create<LibraryState>()(
         void get().hydrateBookContents();
       },
 
-      getSortedBooks: (sort) => {
+      getSortedBooks: (sort, vault = 'public') => {
         const { books, progress } = get();
-        const list = [...books];
+        const list = books.filter((b) => getBookVault(b) === vault);
         switch (sort) {
           case 'alphabetical':
             return list.sort((a, b) => a.title.localeCompare(b.title));
@@ -533,9 +563,9 @@ export const useLibraryStore = create<LibraryState>()(
         }
       },
 
-      getRecentlyRead: (limit = 8) => {
+      getRecentlyRead: (limit = 8, vault = 'public') => {
         return get()
-          .getSortedBooks('recentlyRead')
+          .getSortedBooks('recentlyRead', vault)
           .filter((b) => {
             const p = get().progress[b.id];
             return p?.lastReadDate && (p.currentPage > 0 || p.totalTimeRead > 0);
@@ -543,15 +573,17 @@ export const useLibraryStore = create<LibraryState>()(
           .slice(0, limit);
       },
 
-      getLastReadBook: () => {
+      getLastReadBook: (vault = 'public') => {
         const { preferences, books, progress } = get();
         if (preferences.lastOpenedBookId) {
           const found = books.find(
-            (b) => b.id === preferences.lastOpenedBookId,
+            (b) =>
+              b.id === preferences.lastOpenedBookId &&
+              getBookVault(b) === vault,
           );
           if (found) return found;
         }
-        const sorted = get().getSortedBooks('recentlyRead');
+        const sorted = get().getSortedBooks('recentlyRead', vault);
         return (
           sorted.find((b) => {
             const p = progress[b.id];
@@ -562,13 +594,14 @@ export const useLibraryStore = create<LibraryState>()(
 
       getStatsSummary: () => {
         const { books, progress, dailyStats } = get();
+        const publicBooks = books.filter((b) => getBookVault(b) === 'public');
         const today = todayKey();
         const todayStat = dailyStats.find((d) => d.date === today);
-        const booksCompleted = books.filter(
+        const booksCompleted = publicBooks.filter(
           (b) => deriveBookStatus(b, progress[b.id]) === 'completed',
         ).length;
-        const allSessions = Object.values(progress).flatMap(
-          (p) => p.readingSessions,
+        const allSessions = publicBooks.flatMap(
+          (b) => progress[b.id]?.readingSessions ?? [],
         );
         const avgSessionMinutes =
           allSessions.length === 0
@@ -591,8 +624,8 @@ export const useLibraryStore = create<LibraryState>()(
           streak += 1;
         }
 
-        const totalMinutes = Object.values(progress).reduce(
-          (sum, p) => sum + p.totalTimeRead,
+        const totalMinutes = publicBooks.reduce(
+          (sum, b) => sum + (progress[b.id]?.totalTimeRead ?? 0),
           0,
         );
 
@@ -649,6 +682,7 @@ export const useLibraryStore = create<LibraryState>()(
         state.preferences = preferences;
         state.books = state.books.map((b) => ({
           ...b,
+          vault: b.vault ?? 'public',
           status: b.statusLocked
             ? b.status
             : deriveBookStatus(b, state.progress[b.id]),
