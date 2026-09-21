@@ -3,11 +3,12 @@ import { ScrollView, StyleSheet, Text, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useAppTheme } from '../../src/hooks/useAppTheme';
 import { useLibraryStore } from '../../src/store/libraryStore';
-import { deriveBookStatus, formatMinutes } from '../../src/utils/helpers';
+import { deriveBookStatus, formatMinutes, getBookVault } from '../../src/utils/helpers';
 
 export default function StatsScreen() {
   const theme = useAppTheme();
-  const books = useLibraryStore((s) => s.books);
+  const allBooks = useLibraryStore((s) => s.books);
+  const books = allBooks.filter((b) => getBookVault(b) === 'public');
   const progress = useLibraryStore((s) => s.progress);
   const dailyStats = useLibraryStore((s) => s.dailyStats);
   const summary = useLibraryStore((s) => s.getStatsSummary)();

@@ -1,4 +1,8 @@
-import { BookStatus } from '../types';
+import { Book, BookStatus, BookVault } from '../types';
+
+export function getBookVault(book: Pick<Book, 'vault'>): BookVault {
+  return book.vault ?? 'public';
+}
 
 export function createId(): string {
   return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;

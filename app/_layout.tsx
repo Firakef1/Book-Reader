@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { Image, StyleSheet, Text, View } from 'react-native';
+import { AppState, Image, StyleSheet, Text, View } from 'react-native';
 import { Stack, useRouter, useSegments } from 'expo-router';
 import { StatusBar } from 'expo-status-bar';
 import * as SplashScreen from 'expo-splash-screen';
@@ -14,7 +14,9 @@ import {
   SourceSans3_700Bold,
 } from '@expo-google-fonts/source-sans-3';
 import { useLibraryStore } from '../src/store/libraryStore';
+import { useVaultStore } from '../src/store/vaultStore';
 import { useAppTheme } from '../src/hooks/useAppTheme';
+import { getBookVault } from '../src/utils/helpers';
 import Constants from 'expo-constants';
 
 const INK = '#0A0A0A';
@@ -42,6 +44,7 @@ function BrandSplash() {
 export default function RootLayout() {
   const theme = useAppTheme();
   const hydrated = useLibraryStore((s) => s.hydrated);
+  const vaultHydrated = useVaultStore((s) => s.hydrated);
   const hasOnboarded = useLibraryStore(
     (s) => s.preferences.hasCompletedOnboarding,
   );
@@ -52,6 +55,7 @@ export default function RootLayout() {
     (s) => s.preferences.lastOpenedBookId,
   );
   const books = useLibraryStore((s) => s.books);
+  const unlockedVault = useVaultStore((s) => s.unlockedVault);
   const router = useRouter();
   const segments = useSegments();
   const brandShownAt = useRef<number | null>(null);
@@ -75,14 +79,25 @@ export default function RootLayout() {
   }, [fontsLoaded]);
 
   useEffect(() => {
-    if (!fontsLoaded || !hydrated) return;
+    if (!fontsLoaded || !hydrated || !vaultHydrated) return;
     const started = brandShownAt.current ?? Date.now();
     const remaining = Math.max(0, MIN_BRAND_MS - (Date.now() - started));
     const timer = setTimeout(() => setBrandDone(true), remaining);
     return () => clearTimeout(timer);
-  }, [fontsLoaded, hydrated]);
+  }, [fontsLoaded, hydrated, vaultHydrated]);
 
-  const ready = fontsLoaded && hydrated && brandDone;
+  const ready = fontsLoaded && hydrated && vaultHydrated && brandDone;
+
+  useEffect(() => {
+    const sub = AppState.addEventListener('change', (next) => {
+      if (next !== 'background') return;
+      const vaultState = useVaultStore.getState();
+      if (!vaultState.unlockedVault || vaultState.suspendAutoLock) return;
+      vaultState.lock();
+      router.replace('/(tabs)');
+    });
+    return () => sub.remove();
+  }, [router]);
 
   useEffect(() => {
     if (!ready) return;
@@ -96,12 +111,24 @@ export default function RootLayout() {
       return;
     }
 
+    if (segments[0] === 'vault' && !unlockedVault) {
+      router.replace('/(tabs)');
+      return;
+    }
+
+    const lastBook = lastOpenedBookId
+      ? books.find((b) => b.id === lastOpenedBookId)
+      : undefined;
+    const canAutoOpen =
+      lastBook &&
+      getBookVault(lastBook) === 'public' &&
+      books.some((b) => b.id === lastOpenedBookId);
+
     if (
       hasOnboarded &&
       !didAutoOpen.current &&
       openLastBookOnLaunch &&
-      lastOpenedBookId &&
-      books.some((b) => b.id === lastOpenedBookId) &&
+      canAutoOpen &&
       segments[0] !== 'reader'
     ) {
       didAutoOpen.current = true;
@@ -116,6 +143,7 @@ export default function RootLayout() {
     openLastBookOnLaunch,
     lastOpenedBookId,
     books,
+    unlockedVault,
   ]);
 
   if (!ready) {
@@ -139,6 +167,7 @@ export default function RootLayout() {
       >
         <Stack.Screen name="(tabs)" />
         <Stack.Screen name="onboarding" />
+        <Stack.Screen name="vault" options={{ animation: 'fade' }} />
         <Stack.Screen
           name="reader/[id]"
           options={{ animation: 'slide_from_right', gestureEnabled: true }}

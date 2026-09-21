@@ -13,6 +13,10 @@ export type LibrarySort =
   | 'progress';
 export type LibraryStatusFilter = 'all' | BookStatus;
 export type LibraryFormatFilter = 'all' | FileType;
+/** Which shelf a book belongs to. Hidden shelves are gated by password. */
+export type BookVault = 'public' | 'private' | 'decoy';
+/** Unlocked hidden session (never persist). */
+export type UnlockedVault = 'private' | 'decoy';
 
 export interface BookChapter {
   title: string;
@@ -41,6 +45,8 @@ export interface Book {
   sourceName?: string;
   /** Byte size when known — duplicate detection. */
   sourceSize?: number;
+  /** Shelf membership. Defaults to public when missing (legacy data). */
+  vault?: BookVault;
 }
 
 export interface ReadingSession {

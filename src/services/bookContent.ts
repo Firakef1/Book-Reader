@@ -1,5 +1,8 @@
+import { Platform } from 'react-native';
 import { Directory, File, Paths } from 'expo-file-system';
 import * as LegacyFS from 'expo-file-system/legacy';
+
+const isWeb = Platform.OS === 'web';
 
 function ensureContentDirectory(): Directory {
   const dir = new Directory(Paths.document, 'book-content');
@@ -17,15 +20,23 @@ function contentFile(bookId: string): File {
 export async function saveBookTextContent(
   bookId: string,
   content: string,
-): Promise<string> {
-  const dest = contentFile(bookId);
-  if (dest.exists) dest.delete();
-  dest.create({ intermediates: true, overwrite: true });
-  dest.write(content);
-  return dest.uri;
+): Promise<string | null> {
+  if (isWeb) return null;
+  try {
+    const dest = contentFile(bookId);
+    if (dest.exists) dest.delete();
+    dest.create({ intermediates: true, overwrite: true });
+    dest.write(content);
+    return dest.uri;
+  } catch {
+    return null;
+  }
 }
 
-export async function loadBookTextContent(bookId: string): Promise<string | null> {
+export async function loadBookTextContent(
+  bookId: string,
+): Promise<string | null> {
+  if (isWeb) return null;
   try {
     const dest = contentFile(bookId);
     if (!dest.exists) return null;
@@ -41,6 +52,7 @@ export async function loadBookTextContent(bookId: string): Promise<string | null
 }
 
 export function deleteBookTextContent(bookId: string) {
+  if (isWeb) return;
   try {
     const dest = contentFile(bookId);
     if (dest.exists) dest.delete();
@@ -53,21 +65,26 @@ export async function saveBookCoverBytes(
   bookId: string,
   bytes: Uint8Array,
   ext: 'jpg' | 'png' | 'webp' = 'jpg',
-): Promise<string> {
-  const dir = new Directory(Paths.document, 'book-covers');
-  if (!dir.exists) {
-    dir.create({ intermediates: true, idempotent: true });
+): Promise<string | null> {
+  if (isWeb) return null;
+  try {
+    const dir = new Directory(Paths.document, 'book-covers');
+    if (!dir.exists) {
+      dir.create({ intermediates: true, idempotent: true });
+    }
+    const safe = bookId.replace(/[^a-zA-Z0-9_-]/g, '');
+    const dest = new File(dir, `${safe}.${ext}`);
+    if (dest.exists) dest.delete();
+    dest.create({ intermediates: true, overwrite: true });
+    dest.write(bytes);
+    return dest.uri;
+  } catch {
+    return null;
   }
-  const safe = bookId.replace(/[^a-zA-Z0-9_-]/g, '');
-  const dest = new File(dir, `${safe}.${ext}`);
-  if (dest.exists) dest.delete();
-  dest.create({ intermediates: true, overwrite: true });
-  dest.write(bytes);
-  return dest.uri;
 }
 
 export function deleteBookCover(coverImage?: string | null) {
-  if (!coverImage) return;
+  if (isWeb || !coverImage) return;
   try {
     const file = new File(coverImage);
     if (file.exists) file.delete();

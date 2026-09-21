@@ -482,11 +482,12 @@ async function buildBookFromSavedFile(input: {
     chapters = parsed.chapters.length > 1 ? parsed.chapters : undefined;
     if (parsed.coverBytes && parsed.coverExt) {
       try {
-        coverImage = await saveBookCoverBytes(
+        const saved = await saveBookCoverBytes(
           input.id,
           parsed.coverBytes,
           parsed.coverExt,
         );
+        coverImage = saved ?? undefined;
       } catch {
         // optional
       }
